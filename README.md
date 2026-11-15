@@ -37,7 +37,23 @@ The snapshot includes scheduler admission and capacity diagnostics; multi-sequen
 
 ## Evidence and limitations
 
-Recorded runtime observations include two requests visible simultaneously as `running=2`, short overlapping streaming and tool-call requests, prefix reuse, and one isolated 30-minute coding-agent run (28 completed cycles and 84 tool calls) without a recorded runtime error or service restart. These are bounded acceptance observations, not an endurance guarantee. No PP/TG figures are published because metric provenance and semantics have not been independently validated for a benchmark. The full GPU lifecycle suite is incomplete.
+### Runtime validation on CMP50HX
+
+The recovered Experimental B was exercised on the actual two-GPU CMP50HX host; it is not an engine that has only received CPU or source checks. GP-12 included production runtime use and bounded GPU acceptance under the recorded profiles below. Results establish the tested paths and conditions, not every workload or a general stability guarantee.
+
+- **10-minute stream and concurrent request (2026-11-14):** at a 147456-token per-request context, a streaming request returned HTTP 200 and ran for the 600-second client limit after first token (TTFT 1.31 s; 12,513 chunks, 240,939 characters). During the stream, an uneven 2,364-token prompt / 17-token output request returned HTTP 200 in 3.46 s. The scheduler log places both IDs in one batch with `running=2`; this confirms actual overlap for this pair. DFlash counters reached 13,025 drafts / 33,161 accepted. The logged KV capacity was 229,376 tokens. The tested pair fit dynamically; two requests each filling the full context were not tested and would exceed that logged capacity. 147456 is the highest sampled passing context for this pair; the sampled 160K pair did not fit, so this is not a universal maximum.
+- **Post-reboot current-profile acceptance (2026-11-15):** B restarted on the two GPUs with context 221184, `MAX_NUM_SEQS=2`, DFlash2=7, prefix caching, CUDA Graphs, and `qwen3_xml`. A simultaneous text stream and `lookup_city` tool request both returned HTTP 200; the scheduler reported `running=2`, the tool JSON was valid, and DFlash counters increased. A repeated identical 20,925-token prompt with a named tool completed three times (25.793 / 4.541 / 3.343 s); prefix hits advanced 0 → 18,128 → 36,256. This confirms the exercised GPU prefix-restore/repeated-admission path, not every partial-block or preemption mapping. An uneven approximately 190,126-content-token prompt plus a short tool request also passed (KV peak 77.27%; exact full chat-template token count was not captured).
+- **Agent endurance (2026-11-15):** an isolated coding-agent task completed 28 cycles, 84 tool calls, 28 edits and 56 reads over 1,828.9 seconds (~30.5 minutes). Health remained true; service PID stayed stable; no guard or runtime error was recorded. Across 177 samples, GPU0/1 reached 100% utilization and maximum temperatures were 60/69 °C; GPU2 remained idle. Minimum `MemAvailable` was 5.601 GiB and `SwapFree` 7.523 GiB; memory PSI `avg10` peaked at 0. This is a bounded run, not multi-hour or multi-day endurance.
+- **Cancellation and client use:** cancellation was exercised during GP-12 without a reported stuck runtime or service failure. OpenCode and Open WebUI client workflows were also exercised against B. These are owner-confirmed acceptance observations, not a version-complete client compatibility matrix; cancellation timing and UI-version details were not captured in the published test artifacts.
+- **Current operation:** as of 2026-11-15, production `vllm-b.service` was active on GPU0/1, `/health` returned 200, and `/v1/models` reported `swift15-qwen38-awq` with context 221184. The owner reports seeing around **90 tok/s on average** during real tasks and stable operation. Treat this as a preliminary live-use observation: it is not a controlled benchmark and has no fixed prompt, context, concurrency, or measurement window.
+
+One B-only throughput snapshot measured about 41.76 tok/s for a single 256-token cold-prefix output and estimated 52.85 / 49.55 tok/s for two simultaneous 128-token outputs. These short per-request observations are configuration-specific and are not directly comparable with the owner's ~90 tok/s live-use observation. No Neith comparison or general speedup is claimed.
+
+### Clean-build reproducibility and remaining GPU coverage
+
+The production runtime evidence above came from the recovered Experimental B working tree. A **clean native build and install from the published GitHub checkout have not been reproduced**. This is a separate packaging/build question and does not invalidate the runtime tests of the recovered build. No wheel or container image is published.
+
+Startup graph capture was observed, and CUDA Graphs were active during runtime acceptance. **CUDA Graph replay after slot reuse** is still not independently covered. Full GDN/Mamba slot lifecycle and GPU preemption/resume remain incomplete; cancellation acceptance does not imply preemption/resume coverage. The CPU cache-shift regression reproduced baseline FAIL and patched PASS, and GPU prefix restore was exercised in the repeated-prompt case, but this does not cover every GPU cache-shift lifecycle branch. Required tool calling with default reasoning also remains a known parser limitation.
 
 Known open items:
 
@@ -45,8 +61,8 @@ Known open items:
 - The DFlash2 cache-shift defect is not established as a cause of those reboots; its presence in the reboot-time source is also **UNKNOWN**.
 - GPU-level preemption/resume, complete GDN slot lifecycle, and CUDA Graph replay after slot reuse still need direct acceptance.
 - `tool_choice=required` combined with reasoning remains unstable.
-- CPU regression tests do not replace GPU lifecycle tests; a clean build has not been verified.
-- No performance comparison against Neith or other runtime is claimed.
+- CPU regression tests do not replace the remaining GPU lifecycle tests; a clean build from this GitHub checkout has not been verified.
+- The ~90 tok/s figure is owner-reported operational observation, not a formal benchmark; no performance comparison against Neith or another runtime is claimed.
 
 ## Build and checks
 
