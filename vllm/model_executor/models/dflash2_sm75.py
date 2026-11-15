@@ -333,7 +333,30 @@ class Sm75DFlash2ResidualNorm(nn.Module):
 
 
 class Sm75DFlash2MLP(nn.Module):
-    """SM75 implementation of DFlash2's BF16-trained SwiGLU transport."""
+    """SM75 SwiGLU transport for dense and GPTQ INT8 Qwen3 MLPs."""
+
+    @staticmethod
+    def supports(mlp: nn.Module) -> bool:
+        """Whether this wrapper can preserve the down-projection contract."""
+        down_proj = getattr(mlp, "down_proj", None)
+        weight = getattr(down_proj, "weight", None)
+        if isinstance(weight, torch.Tensor) and weight.ndim == 2:
+            return True
+
+        # AutoGPTQ/Marlin stores packed weights and scales, not a dense weight.
+        # Limit this path to the symmetric INT8 format used by this DFlash draft.
+        quant_method = getattr(down_proj, "quant_method", None)
+        quant_config = getattr(quant_method, "quant_config", None)
+        return (
+            isinstance(getattr(down_proj, "qweight", None), torch.Tensor)
+            and isinstance(getattr(down_proj, "scales", None), torch.Tensor)
+            and callable(getattr(quant_method, "apply", None))
+            and getattr(quant_config, "weight_bits", None) == 8
+            and getattr(quant_config, "is_sym", None) is True
+            and isinstance(
+                getattr(down_proj, "input_size_per_partition", None), int
+            )
+        )
 
     def __init__(self, mlp: nn.Module) -> None:
         super().__init__()
@@ -343,18 +366,49 @@ class Sm75DFlash2MLP(nn.Module):
         self._accumulation_limit: float | None = None
 
     def initialize_down_projection_bound(self) -> None:
-        """Derive a finite FP16 partial-sum bound from loaded local weights."""
+        """Bound local FP16 partials without unpacking/dequantizing GPTQ weights."""
         weight = getattr(self.down_proj, "weight", None)
-        if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
-            raise ValueError(
-                "DFlash2 SM75 transport requires an unquantized 2-D down projection."
-            )
         tp_size = max(1, int(getattr(self.down_proj, "tp_size", 1)))
-        with torch.no_grad():
-            self._down_projection_l2_bound = float(
-                torch.linalg.vector_norm(weight.float(), dim=1).amax().item()
+        if isinstance(weight, torch.Tensor) and weight.ndim == 2:
+            with torch.no_grad():
+                self._down_projection_l2_bound = float(
+                    torch.linalg.vector_norm(weight.float(), dim=1).amax().item()
+                )
+        else:
+            quant_method = getattr(self.down_proj, "quant_method", None)
+            quant_config = getattr(quant_method, "quant_config", None)
+            qweight = getattr(self.down_proj, "qweight", None)
+            scales = getattr(self.down_proj, "scales", None)
+            input_size = getattr(
+                self.down_proj, "input_size_per_partition", None
             )
-        # Each rank contributes a FP16 tensor to the row-parallel all-reduce.
+            weight_bits = getattr(quant_config, "weight_bits", None)
+            is_symmetric = getattr(quant_config, "is_sym", None)
+            if not (
+                isinstance(qweight, torch.Tensor)
+                and isinstance(scales, torch.Tensor)
+                and isinstance(input_size, int)
+                and input_size > 0
+                and scales.numel() > 0
+                and weight_bits == 8
+                and is_symmetric is True
+            ):
+                raise ValueError(
+                    "DFlash2 SM75 quantized MLP transport supports only "
+                    "symmetric GPTQ INT8 projections with packed weights and scales."
+                )
+            # Every symmetric INT8 dequantized coefficient is bounded by
+            # 128 * max(scale). Thus sqrt(K) * that value bounds every local
+            # output-row L2 norm, independent of Marlin's weight/scale packing.
+            # Only the small scales tensor is inspected; qweight is never
+            # unpacked or dequantized.
+            with torch.no_grad():
+                max_scale = float(scales.float().abs().amax().item())
+            self._down_projection_l2_bound = (
+                max_scale * float(1 << (weight_bits - 1)) * input_size**0.5
+            )
+
+        # Each TP rank contributes a partial to the row-parallel SUM.
         self._accumulation_limit = _HALF_PAYLOAD_LIMIT / tp_size
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -375,6 +429,8 @@ class Sm75DFlash2MLP(nn.Module):
         payload, scales = synchronize_dflash2_mlp_scales(
             payload, scales, int(getattr(self.down_proj, "tp_size", 1))
         )
+        # Call the original module so GPTQ/Marlin's quant_method owns the
+        # projection. Restore the shared row scale exactly once, after TP SUM.
         projected, _ = self.down_proj(payload)
         return restore_dflash2_mlp_sm75(projected, scales)
 

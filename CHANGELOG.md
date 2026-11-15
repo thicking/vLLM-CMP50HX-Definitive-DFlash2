@@ -2,6 +2,44 @@
 
 This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately from upstream vLLM releases.
 
+## v0.2.2-post2 - 2026-09-26
+
+Patch release following `v0.2.2-post1`. This release further strengthens
+DFlash2 prefix-cache replay and target-state handling.
+
+### DFlash2 prefix cache and target state
+
+- Retains DFlash2 target replay state across prefix-cache reuse and alternating
+  prefill/decode requests, so reusable target state is not lost between turns.
+- Restores the configured target Mamba speculative state pages for DFlash2 and
+  DSpark while keeping draft KV pages in their independent pools.
+- Accounts for the resident replay and hashed-boundary pages together with the
+  target speculative pages in Mamba align mode, keeping target block tables and
+  KV capacity consistent during speculative replay.
+- Adds regression coverage for prefix-cache replay and DFlash target state
+  sizing and accounting.
+
+## v0.2.2-post1 - 2026-09-26
+
+Patch release following `v0.2.2`, based on the latest `main` runtime.
+
+### DFlash and hybrid Mamba correctness
+
+- Keeps requests that already emitted decode tokens active while a later request
+  continues chunked prefill, preventing unnecessary decode pauses.
+- Stops reserving speculative Mamba state pages for DFlash2 and DSpark target
+  KV, while retaining the resident replay state required by align mode.
+- Preserves hashed Mamba align boundary state across decode and releases only
+  obsolete unhashed blocks, keeping DFlash target prefix-cache entries reusable.
+- Preserves restored-token accounting through the following DFlash decode step.
+
+### Profiles and validation
+
+- Adds four validated 2xT10 Qwen3.8-27B INT4 W4A16 MTP3 routes covering FP8 KV,
+  TQ4NC, TQK8V4, text-only, and text-image serving.
+- Adds focused scheduler, KV sizing, and prefix-cache regression coverage for
+  the repaired paths.
+
 ## v0.2.2 - 2026-09-25
 
 Incremental release from the validated `v0.2.1` SM75 serving snapshot

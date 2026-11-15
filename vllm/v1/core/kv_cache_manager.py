@@ -515,9 +515,30 @@ class KVCacheManager:
                     num_tokens_main_model=full_num_tokens,
                     apply_admission_cap=True,
                 )
-                if not self.coordinator.can_allocate(
-                    [count + watermark_blocks + reserved_blocks for count in counts]
-                ):
+                required_by_group = [
+                    count + watermark_blocks + reserved_blocks for count in counts
+                ]
+                if not self.coordinator.can_allocate(required_by_group):
+                    free_by_group = [
+                        pool.get_num_free_blocks()
+                        for pool in self.coordinator.block_pools
+                    ]
+                    capacity_by_group = [
+                        pool.num_gpu_blocks for pool in self.coordinator.block_pools
+                    ]
+                    logger.warning(
+                        "GP12_ALLOCATOR_REJECT stage=full_sequence request=%s "
+                        "prompt=%d request_tokens=%d required=%s free=%s capacity=%s "
+                        "watermark=%d reserved=%d",
+                        request.request_id,
+                        request.num_prompt_tokens,
+                        request.num_tokens,
+                        required_by_group,
+                        free_by_group,
+                        capacity_by_group,
+                        watermark_blocks,
+                        reserved_blocks,
+                    )
                     return None
             else:
                 required_blocks = num_blocks_to_allocate + watermark_blocks
@@ -568,9 +589,29 @@ class KVCacheManager:
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_tokens_main_model=num_tokens_main_model,
             )
-            if not self.coordinator.can_allocate(
-                [count + watermark_blocks + reserved_blocks for count in counts]
-            ):
+            required_by_group = [
+                count + watermark_blocks + reserved_blocks for count in counts
+            ]
+            if not self.coordinator.can_allocate(required_by_group):
+                free_by_group = [
+                    pool.get_num_free_blocks() for pool in self.coordinator.block_pools
+                ]
+                capacity_by_group = [
+                    pool.num_gpu_blocks for pool in self.coordinator.block_pools
+                ]
+                logger.warning(
+                    "GP12_ALLOCATOR_REJECT stage=next_step request=%s "
+                    "prompt=%d request_tokens=%d required=%s free=%s capacity=%s "
+                    "watermark=%d reserved=%d",
+                    request.request_id,
+                    request.num_prompt_tokens,
+                    request.num_tokens,
+                    required_by_group,
+                    free_by_group,
+                    capacity_by_group,
+                    watermark_blocks,
+                    reserved_blocks,
+                )
                 return None
         else:
             available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks

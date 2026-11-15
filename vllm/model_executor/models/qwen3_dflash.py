@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import io
+import re
 from collections.abc import Iterable
 
 import torch
@@ -393,6 +394,44 @@ class DFlashQwen3Model(nn.Module):
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
         self.quant_config = get_draft_quant_config(vllm_config)
+        # Draft module objects are registered under local layers.0..N, while
+        # GPTQ receives the target-offset prefix layers.start_layer_id.. .
+        # Add runtime aliases to GPTQ metadata; checkpoint names stay local.
+        if self.quant_config is not None and hasattr(
+            self.quant_config, "modules_in_block_to_quantize"
+        ):
+            modules = self.quant_config.modules_in_block_to_quantize
+            if isinstance(modules, list) and all(
+                isinstance(module, str) for module in modules
+            ):
+                self.quant_config.packed_modules_mapping = dict(
+                    Qwen3ForCausalLM.packed_modules_mapping
+                )
+                if start_layer_id:
+                    layer_pattern = re.compile(
+                        r"(?<![A-Za-z0-9_.])layers\.(\d+)(?=\.|$)"
+                    )
+                    aliases = []
+                    for module in modules:
+                        match = layer_pattern.search(module)
+                        if (
+                            match
+                            and int(match.group(1)) < self.config.num_hidden_layers
+                        ):
+                            aliases.append(
+                                layer_pattern.sub(
+                                    lambda found: (
+                                        f"layers.{int(found.group(1)) + start_layer_id}"
+                                    ),
+                                    module,
+                                    count=1,
+                                )
+                            )
+                    modules.extend(alias for alias in aliases if alias not in modules)
+            else:
+                raise ValueError(
+                    "Unsupported GPTQ draft module metadata layout: expected list[str]"
+                )
 
         drafter_config = getattr(self.config, "eagle_config", {})
         drafter_config.update(getattr(self.config, "dflash_config", {}))
@@ -473,13 +512,42 @@ class DFlashQwen3Model(nn.Module):
     ) -> None:
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
-        # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
-        kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
-        self._fused_kv_weight = torch.cat(kv_weights, dim=0)
-        if has_bias:
-            kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
-            self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
+        # Dense checkpoints can share one fused GEMM. Quantized projections
+        # (e.g. GPTQ Marlin) have packed parameters instead of a dense .weight;
+        # keep their modules and call their quantized forward methods below.
+        self._context_qkv_projs = [a.qkv_proj for a in layers_attn]
+        self._context_q_sizes = [a.q_size for a in layers_attn]
+        qkv_weights = [
+            getattr(proj, "weight", None) for proj in self._context_qkv_projs
+        ]
+        dense_qkv_weights = [
+            weight
+            for weight in qkv_weights
+            if isinstance(weight, torch.Tensor) and weight.ndim == 2
+        ]
+        if len(dense_qkv_weights) == len(qkv_weights):
+            # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
+            kv_weights = [
+                weight[q_size :]
+                for weight, q_size in zip(
+                    dense_qkv_weights, self._context_q_sizes, strict=True
+                )
+            ]
+            self._fused_kv_weight: torch.Tensor | None = torch.cat(kv_weights, dim=0)
+            if has_bias:
+                kv_biases = [
+                    proj.bias[q_size :]
+                    for proj, q_size in zip(
+                        self._context_qkv_projs, self._context_q_sizes, strict=True
+                    )
+                ]
+                self._fused_kv_bias: torch.Tensor | None = torch.cat(
+                    kv_biases, dim=0
+                )
+            else:
+                self._fused_kv_bias = None
         else:
+            self._fused_kv_weight = None
             self._fused_kv_bias = None
 
         # K-norm weights stacked into one contiguous [num_layers, head_dim]
@@ -489,16 +557,16 @@ class DFlashQwen3Model(nn.Module):
         ).contiguous()
 
     def _build_fused_kv_buffers(self) -> None:
-        """Build fused weight buffers for precompute_and_store_context_kv.
+        """Prepare buffers for precompute_and_store_context_kv.
 
-        Must be called after weights are loaded. Stacks the KV-projection
-        weights, K-norm weights, and RoPE parameters from every attention
-        layer so that precompute_and_store_context_kv can run one fused
-        GEMM for all layers at once. Also aliases the weight of the hidden_norm.
+        Must be called after weights are loaded. Dense KV projections are
+        stacked for one fused GEMM; quantized projections are retained so their
+        quant methods can be called per layer. K-norm weights and RoPE
+        parameters are also stacked across layers.
         """
         layers_attn = [layer.self_attn for layer in self.layers]
         attn0 = layers_attn[0]
-        has_bias = attn0.qkv_proj.bias is not None
+        has_bias = getattr(attn0.qkv_proj, "bias", None) is not None
 
         self._build_context_kv_buffers(layers_attn, has_bias)
 
@@ -539,19 +607,37 @@ class DFlashQwen3Model(nn.Module):
         num_kv_heads: int,
         head_dim: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # --- Fused KV projection (one GEMM for all layers) ---
+        # --- KV projection: fused for dense, quant_method per layer otherwise ---
         normed_context_states = self._normalize_context_states(context_states)
-        all_kv_flat = F.linear(
-            normed_context_states, self._fused_kv_weight, self._fused_kv_bias
-        )
-        # Single contiguous copy that separates K/V and transposes to
-        # layer-major layout.  Result: [2, L, num_ctx, nkv, hd] contiguous.
-        # Indexing dim-0 gives contiguous [L, num_ctx, nkv, hd] for K and V.
-        all_kv = (
-            all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)
-            .permute(2, 1, 0, 3, 4)
-            .contiguous()
-        )
+        if self._fused_kv_weight is None:
+            # Preserve quantization and TP sharding by invoking each QKV layer's
+            # quant_method (Marlin for GPTQ INT8), then collect its local K/V.
+            layer_kv = []
+            for proj, q_size in zip(
+                self._context_qkv_projs, self._context_q_sizes, strict=True
+            ):
+                qkv, _ = proj(normed_context_states)
+                layer_kv.append(
+                    qkv[:, q_size:].view(
+                        num_ctx, 2, num_kv_heads, head_dim
+                    )
+                )
+            all_kv = (
+                torch.stack(layer_kv, dim=1)
+                .permute(2, 1, 0, 3, 4)
+                .contiguous()
+            )
+        else:
+            all_kv_flat = F.linear(
+                normed_context_states, self._fused_kv_weight, self._fused_kv_bias
+            )
+            # Single contiguous copy that separates K/V and transposes to
+            # layer-major layout. Result: [2, L, num_ctx, nkv, hd] contiguous.
+            all_kv = (
+                all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)
+                .permute(2, 1, 0, 3, 4)
+                .contiguous()
+            )
         all_k = all_kv[0]  # [L, num_ctx, nkv, hd], contiguous
         all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
         return all_k, all_v

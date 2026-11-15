@@ -58,6 +58,9 @@ def build_per_request_timing_metrics(
     ``tokens_per_second`` is overall output throughput: all generated tokens
     over the inference interval (scheduling to last output token), so it counts
     the prefill/TTFT phase and is not simply the reciprocal of ``mean_itl_ms``.
+    ``prompt_tokens_per_second`` uses only prompt tokens actually computed by
+    this request over the scheduled-to-first-token prefill interval.
+    ``e2e_latency_ms`` is the server-observed arrival-to-finish interval.
     Each field is left ``None`` when the timestamps it depends on are
     unavailable.
     """
@@ -74,6 +77,8 @@ def build_per_request_timing_metrics(
     queue_time_ms: float | None = None
     mean_itl_ms: float | None = None
     tokens_per_second: float | None = None
+    prompt_tokens_per_second: float | None = None
+    e2e_latency_ms: float | None = None
 
     if scheduled_ts > 0 and first_token_ts > 0:
         time_to_first_token_ms = (first_token_ts - scheduled_ts) * 1000
@@ -93,12 +98,22 @@ def build_per_request_timing_metrics(
         if inference_time_ms > 0:
             tokens_per_second = num_generation_tokens / inference_time_ms * 1000
 
+    if scheduled_ts > 0 and first_token_ts > 0:
+        prefill_time = first_token_ts - scheduled_ts
+        if prefill_time > 0:
+            prompt_tokens_per_second = metrics.num_computed_prompt_tokens / prefill_time
+
+    if metrics.e2e_latency > 0:
+        e2e_latency_ms = metrics.e2e_latency * 1000
+
     return PerRequestMetrics(
         time_to_first_token_ms=time_to_first_token_ms,
         generation_time_ms=generation_time_ms,
         queue_time_ms=queue_time_ms,
         mean_itl_ms=mean_itl_ms,
         tokens_per_second=tokens_per_second,
+        prompt_tokens_per_second=prompt_tokens_per_second,
+        e2e_latency_ms=e2e_latency_ms,
     )
 
 

@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.stats import (
@@ -56,6 +59,44 @@ def test_compute_iteration_details_includes_encoder_stats():
 
     assert iteration_details.num_encoder_inputs == 2
     assert iteration_details.num_encoder_output_tokens == 392
+
+
+def test_request_state_tracks_native_prefill_work_and_e2e_latency():
+    iteration_stats = IterationStats()
+    iteration_stats.iteration_timestamp = 20.0
+    request_stats = RequestStateStats(arrival_time=10.0)
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=100,
+        num_local_cached_tokens=25,
+        num_external_cached_tokens=0,
+    )
+    output = SimpleNamespace(
+        new_token_ids=[1],
+        prefill_stats=prefill_stats,
+        num_nans_in_logits=0,
+        events=None,
+        request_id="request-metrics-test",
+    )
+
+    iteration_stats.update_from_output(
+        output=output,
+        engine_core_timestamp=12.0,
+        is_prefilling=True,
+        req_stats=request_stats,
+        lora_states=MagicMock(),
+        lora_name=None,
+    )
+    iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.STOP,
+        request_id="request-metrics-test",
+        num_prompt_tokens=100,
+        max_tokens_param=1,
+        req_stats=request_stats,
+    )
+
+    assert request_stats.num_computed_prompt_tokens == 75
+    assert request_stats.e2e_latency == 10.0
 
 
 def test_prefill_kv_computed_with_cache():

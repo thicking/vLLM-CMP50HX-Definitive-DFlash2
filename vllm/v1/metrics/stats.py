@@ -219,6 +219,7 @@ class RequestStateStats:
     """Stats that need to be tracked across delta updates."""
 
     num_generation_tokens: int = 0
+    num_computed_prompt_tokens: int = 0
     num_preemptions: int = 0
 
     # This is an engine frontend timestamp (wall-clock)
@@ -230,8 +231,9 @@ class RequestStateStats:
     first_token_ts: float = 0.0
     last_token_ts: float = 0.0
 
-    # first token latency
+    # first-token and end-to-end latency
     first_token_latency: float = 0.0
+    e2e_latency: float = 0.0
 
     # Track if this request is corrupted (NaNs in logits)
     is_corrupted: bool = False
@@ -467,6 +469,9 @@ class IterationStats:
         if is_prefilling:
             if output.prefill_stats is not None:
                 self.prompt_token_stats.update_from_output(output.prefill_stats)
+                req_stats.num_computed_prompt_tokens += (
+                    output.prefill_stats.num_computed_tokens
+                )
 
             first_token_latency = self._time_since(req_stats.arrival_time)
             self.time_to_first_tokens_iter.append(first_token_latency)
@@ -538,6 +543,7 @@ class IterationStats:
         num_cached_tokens: int = 0,
     ):
         e2e_latency = self._time_since(req_stats.arrival_time)
+        req_stats.e2e_latency = e2e_latency
 
         # Queued interval is from first QUEUED event to first SCHEDULED
         queued_time = req_stats.scheduled_ts - req_stats.queued_ts

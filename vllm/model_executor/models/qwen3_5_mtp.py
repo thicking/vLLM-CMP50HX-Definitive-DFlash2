@@ -86,7 +86,41 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
+            quant_config=vllm_config.quant_config,
+            prefix=maybe_prefix(prefix, "embed_tokens"),
         )
+
+        draft_vocab_setting = os.getenv("MTP_DRAFT_VOCAB", "1")
+        if draft_vocab_setting not in ("0", "1"):
+            raise ValueError("MTP_DRAFT_VOCAB must be 0 or 1")
+        self.draft_lm_head = None
+        self.draft_vocab_ids = None
+        if draft_vocab_setting == "1":
+            ids_path = os.path.join(model_config.model, "mtp_draft_vocab_ids.pt")
+            if not os.path.isfile(ids_path):
+                raise FileNotFoundError(
+                    f"MTP_DRAFT_VOCAB=1 requires {ids_path}"
+                )
+            ids = torch.load(ids_path, map_location="cpu", weights_only=True)
+            if not isinstance(ids, torch.Tensor) or ids.ndim != 1 or ids.numel() == 0:
+                raise ValueError("mtp_draft_vocab_ids.pt must be a non-empty 1D tensor")
+            if ids.dtype not in (torch.int32, torch.int64):
+                raise ValueError("mtp_draft_vocab_ids.pt must contain integer token IDs")
+            ids = ids.to(dtype=torch.long).contiguous()
+            if ids.min().item() < 0 or ids.max().item() >= config.vocab_size:
+                raise ValueError(
+                    f"MTP draft token IDs must be in [0, {config.vocab_size})"
+                )
+            if ids.unique().numel() != ids.numel():
+                raise ValueError("mtp_draft_vocab_ids.pt contains duplicate token IDs")
+            self.draft_vocab_ids = ids
+            self.draft_lm_head = ParallelLMHead(
+                int(ids.numel()),
+                config.hidden_size,
+                quant_config=vllm_config.quant_config,
+                prefix=maybe_prefix(prefix, "draft_lm_head"),
+            )
+            logger.info("MTP drafter uses a %d-token draft head", int(ids.numel()))
 
         # Workaround: mtp.fc is stored as BF16 in NVFP4 checkpoints but is
         # missing from hf_quant_config.json exclude_modules. Force unquantized.
@@ -268,6 +302,11 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
             self.lm_head = PPMissingLayer()
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.draft_logits_processor = (
+            LogitsProcessor(int(self.model.draft_vocab_ids.numel()))
+            if self.model.draft_lm_head is not None
+            else None
+        )
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
@@ -329,11 +368,24 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
         hidden_states: torch.Tensor,
         spec_step_idx: int = 0,
     ) -> torch.Tensor | None:
+        if self.draft_logits_processor is not None:
+            sub = self.draft_logits_processor(self.model.draft_lm_head, hidden_states)
+            if sub is None:
+                return None
+            ids = self.model.draft_vocab_ids
+            if ids.device != sub.device:
+                ids = ids.to(sub.device)
+                self.model.draft_vocab_ids = ids
+            full = sub.new_full((sub.shape[0], self.config.vocab_size), float("-inf"))
+            full.index_copy_(1, ids, sub)
+            return full
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         def remap_weight_names(weights):
             for name, weight in weights:
+                if "draft_lm_head" in name and self.model.draft_lm_head is None:
+                    continue
                 if name.startswith("mtp."):
                     name = name.replace("mtp.", "model.")
                 elif any(key in name for key in ["embed_tokens", "lm_head"]):
@@ -344,7 +396,20 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
                 yield name, weight
 
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(remap_weight_names(weights))
+        loaded = loader.load_weights(remap_weight_names(weights))
+        if self.model.draft_lm_head is not None:
+            required = {
+                "model.draft_lm_head.weight_packed",
+                "model.draft_lm_head.weight_scale",
+                "model.draft_lm_head.weight_shape",
+            }
+            missing = required - loaded
+            if missing:
+                raise RuntimeError(
+                    "MTP_DRAFT_VOCAB=1 but checkpoint draft-head tensors were not loaded: "
+                    + ", ".join(sorted(missing))
+                )
+        return loaded
 
 
 class Qwen3_5MoeMTP(Qwen3_5MTP, QwenNextMixtureOfExperts):

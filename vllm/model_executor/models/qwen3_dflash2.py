@@ -292,6 +292,11 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
         self.use_sm75_transport = should_enable_dflash2_sm75(
             config, vllm_config.model_config.dtype
         )
+        # Keep the SM75 residual contract for GPTQ/Marlin by routing the
+        # projections through their quant_method inside the transport wrapper.
+        self.use_sm75_mlp_transport = (
+            self.use_sm75_transport and Sm75DFlash2MLP.supports(self.mlp)
+        )
         if self.use_sm75_transport:
             runtime_dtype = vllm_config.model_config.dtype
             self.self_attn.output_input_scale = dflash2_sm75_residual_gain()
@@ -301,7 +306,13 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
             self.post_attention_layernorm = Sm75DFlash2ResidualNorm(
                 config.hidden_size, config.rms_norm_eps, runtime_dtype
             )
-            self.mlp = Sm75DFlash2MLP(self.mlp)
+            if self.use_sm75_mlp_transport:
+                self.mlp = Sm75DFlash2MLP(self.mlp)
+            else:
+                raise ValueError(
+                    "SM75 DFlash2 residual transport requires a dense or "
+                    "symmetric GPTQ INT8 Qwen3 MLP transport wrapper."
+                )
         draft_config = config.dflash_config
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None
@@ -469,7 +480,7 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
     def initialize_sm75_transport(self) -> None:
         """Finish SM75 scale setup once row-parallel weights have loaded."""
         for layer in self.layers:
-            if layer.use_sm75_transport:
+            if layer.use_sm75_mlp_transport:
                 assert isinstance(layer.mlp, Sm75DFlash2MLP)
                 layer.mlp.initialize_down_projection_bound()
 

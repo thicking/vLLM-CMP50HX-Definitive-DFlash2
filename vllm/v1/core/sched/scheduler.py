@@ -123,6 +123,15 @@ class Scheduler(SchedulerInterface):
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
+        self._gp12_capacity_diag_logged: set[str] = set()
+        self._gp12_two_req_batch_logged = False
+        self._gp12_wait_entry_logged: set[str] = set()
+        self._gp12_wait_post_logged: set[str] = set()
+        logger.warning(
+            "GP12_CAPACITY_INIT max_num_running_reqs=%d scheduler_max_num_seqs=%d",
+            self.max_num_running_reqs,
+            self.scheduler_config.max_num_seqs,
+        )
         self.max_num_scheduled_tokens = (
             self.scheduler_config.max_num_scheduled_tokens
             if self.scheduler_config.max_num_scheduled_tokens is not None
@@ -725,7 +734,11 @@ class Scheduler(SchedulerInterface):
             if input_budget <= draft_slots:
                 break
 
-            if defer_decode_for_prefill_batch and not request.is_prefill_chunk:
+            if (
+                defer_decode_for_prefill_batch
+                and not request.is_prefill_chunk
+                and request.num_output_tokens == 0
+            ):
                 req_index += 1
                 continue
 
@@ -984,12 +997,59 @@ class Scheduler(SchedulerInterface):
             step_skipped_waiting = create_request_queue(self.policy)
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
+                if self.waiting or self.skipped_waiting:
+                    diag_queue = self._select_waiting_queue_for_scheduling()
+                    diag_head = diag_queue.peek_request() if diag_queue is not None else None
+                    if (
+                        diag_head is not None
+                        and diag_head.request_id not in self._gp12_wait_entry_logged
+                    ):
+                        logger.warning(
+                            "GP12_WAIT_ENTRY id=%s step=%d running_ids=%s max_running=%d "
+                            "streaming_input=%d token_budget=%d input_budget=%d draft_slots=%d "
+                            "waiting=%d skipped=%d frontier=%s frontier_step=%s pause=%s",
+                            diag_head.request_id,
+                            self.current_step,
+                            [req.request_id for req in self.running],
+                            self.max_num_running_reqs,
+                            self.num_waiting_for_streaming_input,
+                            token_budget,
+                            input_budget,
+                            draft_slots,
+                            len(self.waiting),
+                            len(self.skipped_waiting),
+                            prefill_frontier,
+                            prefill_frontier_step,
+                            self._pause_state,
+                        )
+                        self._gp12_wait_entry_logged.add(diag_head.request_id)
                 if input_budget <= draft_slots:
                     break
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
                 num_running = len(self.running) + self.num_waiting_for_streaming_input
                 if num_running >= self.max_num_running_reqs:
+                    queue = self._select_waiting_queue_for_scheduling()
+                    head = queue.peek_request() if queue is not None else None
+                    if (
+                        head is not None
+                        and head.request_id not in self._gp12_capacity_diag_logged
+                    ):
+                        logger.warning(
+                            "GP12_CAPACITY_BLOCK request_id=%s max_num_running_reqs=%d "
+                            "running=%d waiting_streaming_input=%d running_ids=%s "
+                            "head_status=%s head_resumable=%s waiting=%d skipped_waiting=%d",
+                            head.request_id,
+                            self.max_num_running_reqs,
+                            len(self.running),
+                            self.num_waiting_for_streaming_input,
+                            [req.request_id for req in self.running],
+                            head.status,
+                            head.resumable,
+                            len(self.waiting),
+                            len(self.skipped_waiting),
+                        )
+                        self._gp12_capacity_diag_logged.add(head.request_id)
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
@@ -1234,6 +1294,15 @@ class Scheduler(SchedulerInterface):
                             num_external_computed_tokens,
                         )
                         if num_new_tokens == 0:
+                            logger.warning(
+                                "GP12_WAIT_REJECT cause=mamba_alignment id=%s requested=%d "
+                                "computed=%d prompt=%d block_size=%d",
+                                request_id,
+                                request.num_tokens - num_computed_tokens,
+                                num_computed_tokens,
+                                request.num_prompt_tokens,
+                                self.cache_config.block_size,
+                            )
                             break
                         if (
                             pad_spec_decode
@@ -1316,6 +1385,22 @@ class Scheduler(SchedulerInterface):
                 )
 
                 if new_blocks is None:
+                    logger.warning(
+                        "GP12_WAIT_REJECT cause=allocate_slots id=%s prompt=%d total=%d "
+                        "computed=%d newly_computed=%d new_tokens=%d lookahead=%d "
+                        "full_sequence_must_fit=%s has_running=%s running=%d max_running=%d",
+                        request_id,
+                        request.num_prompt_tokens,
+                        request.num_tokens,
+                        num_computed_tokens,
+                        num_new_local_computed_tokens,
+                        num_new_tokens,
+                        effective_lookahead_tokens,
+                        self.scheduler_reserve_full_isl,
+                        bool(self.running),
+                        len(self.running),
+                        self.max_num_running_reqs,
+                    )
                     # The request cannot be scheduled.
 
                     # Do not let a request that failed KV admission remain the
@@ -1464,6 +1549,47 @@ class Scheduler(SchedulerInterface):
                 self.prefill_capacity_bound = bool(self.waiting)
 
         # Check if the scheduling constraints are satisfied.
+        if self.waiting or self.skipped_waiting:
+            diag_queue = self._select_waiting_queue_for_scheduling()
+            diag_head = diag_queue.peek_request() if diag_queue is not None else None
+            if (
+                diag_head is not None
+                and diag_head.request_id not in self._gp12_wait_post_logged
+            ):
+                logger.warning(
+                    "GP12_WAIT_POST id=%s step=%d running_ids=%s scheduled=%s "
+                    "max_running=%d streaming_input=%d token_budget=%d input_budget=%d "
+                    "draft_slots=%d waiting=%d skipped=%d frontier=%s frontier_step=%s "
+                    "preempted=%d pause=%s",
+                    diag_head.request_id,
+                    self.current_step,
+                    [req.request_id for req in self.running],
+                    dict(num_scheduled_tokens),
+                    self.max_num_running_reqs,
+                    self.num_waiting_for_streaming_input,
+                    token_budget,
+                    input_budget,
+                    draft_slots,
+                    len(self.waiting),
+                    len(self.skipped_waiting),
+                    prefill_frontier,
+                    prefill_frontier_step,
+                    len(preempted_reqs),
+                    self._pause_state,
+                )
+                self._gp12_wait_post_logged.add(diag_head.request_id)
+
+        if len(num_scheduled_tokens) >= 2 and not self._gp12_two_req_batch_logged:
+            logger.warning(
+                "GP12_BATCH_SCHEDULED request_ids=%s tokens_by_request=%s "
+                "running=%d max_num_running_reqs=%d",
+                sorted(num_scheduled_tokens),
+                dict(num_scheduled_tokens),
+                len(self.running),
+                self.max_num_running_reqs,
+            )
+            self._gp12_two_req_batch_logged = True
+
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
 

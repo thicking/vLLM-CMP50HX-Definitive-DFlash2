@@ -142,7 +142,11 @@ def extract_required_tool_call_streaming(
     except (
         partial_json_parser.core.exceptions.MalformedJSON,
         json.JSONDecodeError,
+        IndexError,
     ):
+        # partial_json_parser's fast repair path can underflow its delimiter
+        # stack for a transient unmatched closing token in streamed output.
+        # Treat that prefix as incomplete and allow the next delta to retry.
         obj = None
 
     # check if the current text is a valid array

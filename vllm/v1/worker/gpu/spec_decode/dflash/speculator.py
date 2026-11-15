@@ -448,21 +448,12 @@ class DFlashSpeculator(DraftModelSpeculator):
         # count is not block-aligned (e.g. a full-prompt cache hit). Skipped
         # for dummy runs, whose idx_mapping does not reference live requests.
         if not dummy_run:
-            for gid in self.draft_kv_cache_group_ids:
-                shift_draft_block_tables(
-                    self.block_tables.input_block_tables[gid],
-                    input_batch.idx_mapping,
-                    self.num_cached_tokens,
-                    self.input_buffers.seq_lens,
-                    self.block_tables.kernel_block_sizes[gid],
-                    self.block_tables.cp_size,
-                )
-            # The cache-restored count describes this admission only. Keep it
-            # for the current draft preparation, then clear it before the next
-            # scheduler step so the already-shifted block table is not shifted
-            # a second time during decode.
-            self.num_cached_tokens.index_fill_(
-                0, input_batch.idx_mapping.to(dtype=torch.long), 0
+            shift_restored_prefix_block_tables(
+                self.block_tables,
+                self.draft_kv_cache_group_ids,
+                input_batch.idx_mapping,
+                self.num_cached_tokens,
+                self.input_buffers.seq_lens,
             )
 
         # Pre-insert context K/V into the cache. Runs eagerly outside the captured graph
@@ -910,3 +901,32 @@ def shift_draft_block_tables(
         CP_SIZE=cp_size,
         BLOCK_SIZE=1024,  # type: ignore
     )
+
+
+def shift_restored_prefix_block_tables(
+    block_tables: BlockTables,
+    draft_kv_cache_group_ids: list[int],
+    idx_mapping: torch.Tensor,
+    num_cached_tokens: torch.Tensor,
+    seq_lens: torch.Tensor,
+) -> None:
+    """Shift each freshly gathered draft table by the persistent cached prefix.
+
+    The cached count is populated when a request is admitted with target KV
+    restored from cache. Those tokens never acquire draft context KV. Input
+    block tables are gathered again from persistent tables on every scheduler
+    step, so the count must remain set for the request lifetime and each fresh
+    batch table must be shifted once. A later admission overwrites the slot.
+    """
+    if idx_mapping.numel() == 0:
+        return
+
+    for gid in draft_kv_cache_group_ids:
+        shift_draft_block_tables(
+            block_tables.input_block_tables[gid],
+            idx_mapping,
+            num_cached_tokens,
+            seq_lens,
+            block_tables.kernel_block_sizes[gid],
+            block_tables.cp_size,
+        )

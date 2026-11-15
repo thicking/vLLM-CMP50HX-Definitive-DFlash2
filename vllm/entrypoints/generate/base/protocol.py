@@ -80,6 +80,8 @@ class PerRequestMetrics(OpenAIBaseModel):
     queue_time_ms: float | None = None
     mean_itl_ms: float | None = None
     tokens_per_second: float | None = None
+    prompt_tokens_per_second: float | None = None
+    e2e_latency_ms: float | None = None
     # Experimental, subject to change.
     speculative_decoding: SpeculativeDecodingMetrics | None = None
 

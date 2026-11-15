@@ -64,6 +64,8 @@ _PER_REQUEST_STATS = RequestStateStats(
     first_token_ts=2.0,
     last_token_ts=3.0,
     num_generation_tokens=2,
+    num_computed_prompt_tokens=250,
+    e2e_latency=2.25,
 )
 
 
@@ -711,6 +713,8 @@ def test_build_per_request_timing_metrics_valid_timestamps():
     assert metrics.queue_time_ms == pytest.approx(500.0)
     assert metrics.mean_itl_ms == pytest.approx(1000.0 / 9, rel=1e-4)
     assert metrics.tokens_per_second == pytest.approx(10.0 / 1.5, rel=1e-4)
+    assert metrics.prompt_tokens_per_second == pytest.approx(500.0)
+    assert metrics.e2e_latency_ms == pytest.approx(2250.0)
 
 
 @pytest.mark.asyncio

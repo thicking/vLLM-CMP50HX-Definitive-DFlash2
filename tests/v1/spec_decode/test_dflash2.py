@@ -6,7 +6,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
 from vllm.model_executor.models.dflash2_sm75 import (
+    Sm75DFlash2MLP,
     Sm75DFlash2ResidualNorm,
     encode_dflash2_mlp_sm75,
     restore_dflash2_mlp_sm75,
@@ -184,6 +186,83 @@ def test_sm75_dflash2_mlp_codec_scales_for_down_projection_l2_bound():
     )
 
 
+def test_sm75_dflash2_quantized_bound_uses_int8_metadata_without_dequantizing():
+    class QuantMethod:
+        quant_config = SimpleNamespace(weight_bits=8, is_sym=True)
+
+        def apply(self, _layer, value):
+            return value
+
+    down_proj = SimpleNamespace(
+        qweight=torch.ones((2, 3), dtype=torch.int32),
+        scales=torch.tensor([[0.125, 0.25], [0.5, 0.125]]),
+        input_size_per_partition=8,
+        tp_size=2,
+        quant_method=QuantMethod(),
+    )
+    mlp = SimpleNamespace(gate_up_proj=torch.nn.Identity(), down_proj=down_proj)
+
+    assert Sm75DFlash2MLP.supports(mlp)
+    wrapper = Sm75DFlash2MLP(mlp)
+    wrapper.initialize_down_projection_bound()
+
+    # Global max scale bounds every row while qweight remains packed.
+    assert wrapper._down_projection_l2_bound == pytest.approx(
+        0.5 * 128 * 8**0.5
+    )
+    assert wrapper._accumulation_limit == pytest.approx(32752.0 / 2)
+
+
+def test_sm75_dflash2_quantized_mlp_restores_the_scale_contract_once():
+    class QuantMethod:
+        def __init__(self, apply):
+            self.quant_config = SimpleNamespace(weight_bits=8, is_sym=True)
+            self.apply = apply
+
+    class FakeQuantLinear(torch.nn.Module):
+        def __init__(self, apply):
+            super().__init__()
+            self.quant_method = QuantMethod(apply)
+            self.last_input = None
+            self.qweight = torch.ones((1, 1), dtype=torch.int32)
+            self.scales = torch.tensor([[0.25]])
+            self.input_size_per_partition = 2
+            self.tp_size = 1
+
+        def forward(self, value):
+            self.last_input = value.detach().clone()
+            return self.quant_method.apply(self, value), None
+
+    gate_up_value = torch.tensor(
+        [[0.25, -0.5, 1.0, 2.0], [-0.75, 0.5, 1.5, -1.0]],
+        dtype=torch.float16,
+    )
+    gate_up = FakeQuantLinear(lambda _layer, _x: gate_up_value)
+    down_weight = torch.tensor(
+        [[0.5, -0.25], [0.125, 0.75]], dtype=torch.float16
+    )
+    down = FakeQuantLinear(
+        lambda _layer, value: torch.nn.functional.linear(value, down_weight)
+    )
+    mlp = SimpleNamespace(gate_up_proj=gate_up, down_proj=down)
+    wrapper = Sm75DFlash2MLP(mlp)
+    wrapper.initialize_down_projection_bound()
+
+    x = torch.tensor([[1.0, -2.0], [0.5, 4.0]], dtype=torch.float16)
+    actual = wrapper(x)
+
+    torch.testing.assert_close(gate_up.last_input, x / 32.0)
+    expected_payload, expected_scales = encode_dflash2_mlp_sm75(
+        gate_up_value,
+        down_projection_l2_bound=wrapper._down_projection_l2_bound,
+        accumulation_limit=wrapper._accumulation_limit,
+    )
+    torch.testing.assert_close(down.last_input, expected_payload)
+    expected_projected = torch.nn.functional.linear(expected_payload, down_weight)
+    expected = expected_projected.float() * (expected_scales[:, None] / 256.0)
+    torch.testing.assert_close(actual, expected.to(actual.dtype))
+
+
 def test_sm75_dflash2_restore_matches_row_scale_contract():
     output = torch.tensor([[4.0, -2.0], [0.5, -1.0]], dtype=torch.float16)
     scales = torch.tensor([1.0, 8.0], dtype=torch.float32)
@@ -244,6 +323,77 @@ def test_sm75_dflash2_rmsnorm_returns_fp16_from_a_wide_residual_input():
     assert state.dtype is torch.float32
     torch.testing.assert_close(state, expected_state)
     torch.testing.assert_close(actual, expected)
+
+
+def test_dflash_context_kv_projection_uses_quantized_qkv_modules():
+    class QuantizedProjection:
+        def __init__(self, kv_values: torch.Tensor):
+            self.kv_values = kv_values
+
+        def __call__(self, hidden_states: torch.Tensor):
+            query = hidden_states.new_zeros((hidden_states.shape[0], 2))
+            kv = self.kv_values.expand(hidden_states.shape[0], -1)
+            return torch.cat((query, kv), dim=-1), None
+
+    values = [
+        torch.tensor([[10.0, 11.0, 20.0, 21.0], [12.0, 13.0, 22.0, 23.0]]),
+        torch.tensor([[30.0, 31.0, 40.0, 41.0], [32.0, 33.0, 42.0, 43.0]]),
+    ]
+    layers_attn = [
+        SimpleNamespace(
+            qkv_proj=QuantizedProjection(kv),
+            q_size=2,
+            k_norm=SimpleNamespace(weight=torch.nn.Parameter(torch.ones(2))),
+        )
+        for kv in values
+    ]
+    model = SimpleNamespace(
+        hidden_norm=SimpleNamespace(weight=torch.nn.Parameter(torch.ones(4))),
+        _normalize_context_states=lambda states: states,
+    )
+    DFlashQwen3Model._build_context_kv_buffers(model, layers_attn, has_bias=False)
+
+    assert model._fused_kv_weight is None
+    context = torch.zeros(2, 4)
+    actual_k, actual_v = DFlashQwen3Model._project_context_kv(
+        model, context, num_ctx=2, num_layers=2, num_kv_heads=1, head_dim=2
+    )
+    expected_k = torch.stack([value[:, :2].view(2, 1, 2) for value in values])
+    expected_v = torch.stack([value[:, 2:].view(2, 1, 2) for value in values])
+    torch.testing.assert_close(actual_k, expected_k)
+    torch.testing.assert_close(actual_v, expected_v)
+
+
+def test_dflash_context_kv_projection_keeps_dense_fused_gemm():
+    weights = [
+        torch.nn.Parameter(torch.arange(24, dtype=torch.float32).view(6, 4)),
+        torch.nn.Parameter(torch.arange(24, 48, dtype=torch.float32).view(6, 4)),
+    ]
+    layers_attn = [
+        SimpleNamespace(
+            qkv_proj=SimpleNamespace(weight=weight, bias=None),
+            q_size=2,
+            k_norm=SimpleNamespace(weight=torch.nn.Parameter(torch.ones(2))),
+        )
+        for weight in weights
+    ]
+    model = SimpleNamespace(
+        hidden_norm=SimpleNamespace(weight=torch.nn.Parameter(torch.ones(4))),
+        _normalize_context_states=lambda states: states,
+    )
+    DFlashQwen3Model._build_context_kv_buffers(model, layers_attn, has_bias=False)
+
+    assert model._fused_kv_weight is not None
+    context = torch.arange(8, dtype=torch.float32).view(2, 4)
+    actual_k, actual_v = DFlashQwen3Model._project_context_kv(
+        model, context, num_ctx=2, num_layers=2, num_kv_heads=1, head_dim=2
+    )
+    expected_flat = torch.nn.functional.linear(
+        context, torch.cat([weight[2:] for weight in weights])
+    )
+    expected = expected_flat.view(2, 2, 2, 1, 2).permute(2, 1, 0, 3, 4)
+    torch.testing.assert_close(actual_k, expected[0].contiguous())
+    torch.testing.assert_close(actual_v, expected[1].contiguous())
 
 
 def test_sm75_dflash2_uses_the_context_norm_boundary():

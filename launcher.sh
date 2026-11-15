@@ -193,11 +193,11 @@ validate_configured_kv_concurrency() {
 
   required=$((max_num_seqs * max_model_len))
   if (( total < required )); then
-    echo "ERROR: configured concurrency cannot be admitted by the allocated GPU KV cache." >&2
+    echo "WARNING: full configured concurrency exceeds allocated GPU KV cache." >&2
     echo "  GPU KV tokens: $total" >&2
-    echo "  Required:      $max_num_seqs x $max_model_len = $required" >&2
-    echo "  Reduce MAX_MODEL_LEN or MAX_NUM_SEQS, or increase available KV capacity." >&2
-    return 1
+    echo "  Full worst-case requirement: $max_num_seqs x $max_model_len = $required" >&2
+    echo "  Continuing: actual concurrent requests may fit if their combined active context stays within KV capacity." >&2
+    return 0
   fi
 
   echo "KV concurrency check: OK ($total tokens >= $max_num_seqs x $max_model_len = $required)"
@@ -884,6 +884,7 @@ NON_INTERACTIVE_CONFIG_KEYS=(
   ENABLE_PREFIX_CACHING
   ENABLE_YARN
   ENABLE_PROMPT_TOKENS_DETAILS
+  ENABLE_PER_REQUEST_METRICS
   DISABLE_PREFIX_CACHING
   VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH
   VLLM_ENFORCE_STRICT_TOOL_CALLING
@@ -900,6 +901,7 @@ NON_INTERACTIVE_CONFIG_KEYS=(
   START_TIMEOUT
   MM_IMAGE_LIMIT
   MM_LIMIT_JSON
+  MM_ENCODER_ATTN_BACKEND
   CUDA_HOME
   CUDA_VISIBLE_DEVICES
   CUDA_DEVICE_ORDER
@@ -4471,6 +4473,13 @@ validate_speculative_route() {
 apply_speculative_runtime_defaults() {
   local method tokens
 
+  # Raw speculative JSON is authoritative; do not inject shortcut fields.
+  if [[ -n "${SPECULATIVE_CONFIG:-}" ]]; then
+    MTP_K=0
+    export MTP_K
+    return 0
+  fi
+
   method=$(effective_speculative_method)
   case "$method" in
     none|"")
@@ -4701,6 +4710,7 @@ build_args() {
     VLLM_ARGS+=(--enable-prefix-caching)
   fi
   [[ "${ENABLE_PROMPT_TOKENS_DETAILS:-1}" == "1" ]] && VLLM_ARGS+=(--enable-prompt-tokens-details)
+  [[ "${ENABLE_PER_REQUEST_METRICS:-0}" == "1" ]] && VLLM_ARGS+=(--enable-per-request-metrics)
   [[ "${LANGUAGE_MODEL_ONLY:-0}" == "1" ]] && VLLM_ARGS+=(--language-model-only)
   [[ "${SKIP_MM_PROFILING:-0}" == "1" ]] && VLLM_ARGS+=(--skip-mm-profiling)
   if [[ -n "${CUSTOM_ALL_REDUCE_MODE:-}" ]]; then
@@ -4728,6 +4738,8 @@ build_args() {
   elif [[ "$MODEL_FAMILY" == gemma* ]]; then
     VLLM_ARGS+=(--limit-mm-per-prompt '{"image":0,"video":0,"audio":0}')
   fi
+
+  [[ -n "${MM_ENCODER_ATTN_BACKEND:-}" ]] &&     VLLM_ARGS+=(--mm-encoder-attn-backend "$MM_ENCODER_ATTN_BACKEND")
 
   if [[ "$MODEL_FAMILY" == qwen* && -n "${MM_LIMIT_JSON:-}" && -z "${ADDITIONAL_CONFIG_JSON:-}" ]]; then
     VLLM_ARGS+=(--additional-config '{"gdn_prefill_backend":"flashqla_legacy"}')
