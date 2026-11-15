@@ -1,11 +1,11 @@
-# SHA-256 manifest for the recovered Experimental B import
-# Source comparison date: 2026-11-15; base: 2d63e2e322b7488776d1fb822f3556dbd7334116
-# Imported snapshot commit: 87fec2ee41a311fa8548b25daf249f9b07a8b113
-# Critical source/test files were independently hash-checked against the read-only production copy.
+# SHA-256 manifest for the exact recovered Experimental B snapshot tree
+# Snapshot commit: 87fec2ee41a311fa8548b25daf249f9b07a8b113
+# Base commit: 2d63e2e322b7488776d1fb822f3556dbd7334116
+# Critical source/test hashes were independently checked against the read-only production copy.
 # Format: <sha256>  <repository-relative-path>
-6d873fb8ab0e133c7930b432f682f75a86376c8e7ff31de8f1efed0e3f0cfc40  CHANGELOG.md
+9c4b0f4abb9ff2491553baf6526aabbac6e61aa172c78e49295074331f936e68  CHANGELOG.md
 c8a1d77a84a035de207b246fa52762a95a28498c188cbb072ac186adb46a1b9d  PROJECT_RELEASE.env
-97eda2620188e54cd1a38c5c0bb0599804c9c9fdedeadd6ab23710439bc1d97b  README.md
+f532db1ff7246cbb3df058c05782c976f0bd3f1a24b330f13f1ff2837da20836  README.md
 9f8f16f55cbd271759a9baaee3cc79cc9ada17db5259905fce931d08929fb58b  README.zh-CN.md
 380c0ec996114daaa015c1cd9f727450155367e1348352b04c8fee8c874f4d73  VERSION
 38fca93859eb61b7021b58f4324ac5273e122f52a90a526662030cf1a70e5d7a  build.sh
@@ -29,7 +29,7 @@ f14d767d9749f1c8ace754e6d3bfece47ddaf37611cfef608fc012c96f2b9d9f  tests/v1/core/
 9bf6593b67580bc629a6dbf423a31844b1d2ddaa1c860db71ee49c515b14f884  tests/v1/metrics/test_stats.py
 e39c0639874b8f65ba4c0e55852ec49aff5cbd56f3bd3a2e8bd66d400f7814fe  tests/v1/spec_decode/test_dflash2.py
 1e3e17a30e6547026f8693c2f370a795fa3e88ce064f803d7a71aa7ffff30d5b  tests/v1/spec_decode/test_dflash_cache_shift_lifecycle_cpu.py
-78841ca251e75e44fb93cab21bbd49652b1b270198501f300f955a0671279abc  tools/validate_profiles.sh
+3588fea5ca021128d30cc87790783fc47e4520e96aead535cf323529c9aadd2d  tools/validate_profiles.sh
 75eeee6616b904677a88dee5ddbb56307bf53aa60183f9731f06dbed8e22d8fd  vllm/entrypoints/generate/base/protocol.py
 938aa75760bfc8c58ffe0ad395a48dee54801b8ac7bbe7bb3ef077a5670a5d9f  vllm/entrypoints/generate/base/serving.py
 c2d9ae9f527916108cdd820058277386eb5686d33500239d321d279fbb4a0719  vllm/model_executor/models/dflash2_sm75.py
