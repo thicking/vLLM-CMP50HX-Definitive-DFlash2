@@ -1,0 +1,15 @@
+vLLM-CMP50HX-Definitive-DFlash2 is a downstream derivative of the vLLM
+project (https://github.com/vllm-project/vllm) and
+weicj/vLLM-2080Ti-Definitive (https://github.com/weicj/vLLM-2080Ti-Definitive).
+
+Original contributors retain copyright and authorship of their respective
+work. Existing upstream copyright, SPDX, license, attribution, and
+acknowledgement notices are preserved. The project-level license is Apache-2.0;
+third-party components remain subject to their own notices and licenses.
+
+Recovered downstream modifications are listed in PATCHES.md. A listed file
+may contain both upstream material and downstream changes; listing it does not
+claim authorship of the entire file.
+
+The CMP50HX unlock is maintained separately by its authors:
+https://github.com/xrip/cmp50hx-unlock

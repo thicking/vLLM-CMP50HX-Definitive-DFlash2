@@ -53,6 +53,7 @@ total=0
 errors=0
 
 expected_profiles=(
+  2xCMP50HX/qwen27b/w4a16/dflash2-fp8kv-2x221K-text-image.env
   2xT10/qwen27b/w4a16/mtp3-fp8kv-1x262K-text-only.env
   2xT10/qwen27b/w4a16/mtp3-tq4nc-2x220K-text-only.env
   2xT10/qwen27b/w4a16/mtp3-tqk8v4-1x196K-text-image.env

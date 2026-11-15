@@ -80,3 +80,16 @@ real benchmark or smoke result that proves the changed path still works.
   `pyproject.toml` version fallback aligned for releases.
 - Release tags and GitHub Releases are separate. Pushing a tag is not enough to
   update the GitHub Release page.
+# Project-specific downstream guidance
+
+This repository is an independently maintained derivative. Preserve all
+upstream authorship, copyright, license, SPDX, NOTICE, and acknowledgement
+material. Keep downstream attribution scoped to actual changes and update
+`PATCHES.md` when engine behavior changes. Do not rewrite inherited history.
+
+Do not publish secrets, checkpoints, production launcher/unit files, private
+host paths, runtime logs, user prompts, telemetry, virtual environments, or
+compiled caches. Validate the exact release tree and history before publishing.
+Do not treat CPU tests as GPU acceptance or claim a performance improvement
+without comparable measurements. Historical reboot cause and reboot-time
+source provenance remain UNKNOWN unless supported by new evidence.

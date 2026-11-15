@@ -2,6 +2,17 @@
 
 This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately from upstream vLLM releases.
 
+## v0.1.0-alpha.1 - 2026-11-15 (independent downstream project)
+
+- Publishes the recovered Experimental B source snapshot for the CMP50HX route
+  as an independently versioned downstream project.
+- Adds the 2xCMP50HX Qwen3.8-27B AWQ DFlash2=7 route profile and records the
+  recovered runtime settings and evidence limits.
+- Preserves the upstream-fork commit history and adds the recovered dirty-tree
+  changes as a single snapshot commit; see `PATCHES.md` for provenance.
+- This project release tag is separate from the upstream-fork and Python
+  package versions. It does not claim a clean build or complete GPU acceptance.
+
 ## v0.2.2-post2 - 2026-09-26
 
 Patch release following `v0.2.2-post1`. This release further strengthens

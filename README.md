@@ -1,225 +1,62 @@
-<!-- markdownlint-disable MD001 MD041 -->
-# ⚡ vLLM 2080 Ti Definitive Edition
+# vLLM-CMP50HX-Definitive-DFlash2
 
-![vLLM 2080 Ti Definitive Edition cover](docs/assets/vllm-2080ti-definitive-title.jpeg)
+Language: English | [Русский](README.ru.md)
 
-Language: English | [简体中文](README.zh-CN.md)
+An independently maintained source derivative of [vLLM](https://github.com/vllm-project/vllm) and [weicj/vLLM-2080Ti-Definitive](https://github.com/weicj/vLLM-2080Ti-Definitive). This repository preserves the recovered Experimental B runtime snapshot and the associated GP-12 changes for SM75/CMP50HX serving. It is an experimental source release; it is not a new inference engine and does not claim upstream authorship.
 
-The definitive vLLM inference runtime for dual RTX 2080 Ti and other SM75 GPUs,
-including Tesla T10/T40/T4, TITAN RTX, and Quadro RTX 6000/8000.
+## Release status
 
-This hardware-focused fork preserves the SM75-specific source changes, launcher
-profiles, and validation evidence needed to reproduce these Turing inference
-stacks. It is
-based on upstream vLLM; retain both the upstream license and attribution to
-`github.com/weicj` when redistributing a derivative.
+The project release identity is `v0.1.0-alpha.1`. It is independent from the Python package version (`0.2.3.dev0+g2d63e2e32.d20260928.cu130`) and upstream-fork version (`v0.2.2-post2`). No wheel or container image is published. A clean build and install from this repository have not been verified on CMP50HX.
 
-For usage feedback, feature requests, and community discussion, join the
-[Discord community](https://discord.gg/VFqVVySdMS).
+The source snapshot is based on upstream-fork commit `2d63e2e322b7488776d1fb822f3556dbd7334116`. The production checkout was shallow and dirty. Its tracked diff was imported as one snapshot commit; the repository does not invent a patch-by-patch history. A SHA-256 manifest is in [`manifests/production-b-20261115.sha256`](manifests/production-b-20261115.sha256). Exact source state during the host reboots on 2026-11-10 is unavailable, so whether each recovered change existed then is **UNKNOWN**.
 
-![Live single-request throughput demo](docs/assets/vllmspeed_dflash.gif)
+## Recovered runtime profile
 
-Current 0.2.x baseline: `v0.2.2-post2`
-Upstream baseline: `b23433088b` (`v0.29.1rc0-33`)
+| Setting | Observed configuration |
+| --- | --- |
+| Hardware | 2 × NVIDIA CMP 50HX 20 GB, Turing TU102 / SM75 |
+| Target | Swift Qwen3.8-27B AWQ, `compressed-tensors` |
+| Tensor parallelism | TP=2 on GPU0/1 |
+| Draft | DFlash2 GPTQ INT8, TP=2 |
+| Target / draft KV | FP8 / FP16 |
+| `MAX_MODEL_LEN` | 221184 tokens per request |
+| `MAX_NUM_SEQS` | 2 scheduler sequences |
+| DFlash tokens | 7 |
+| CUDA graphs | `FULL_AND_PIECEWISE`, capture sizes 8 and 16; DFlash full graphs enabled |
+| Prefix caching | Enabled; Mamba cache mode `align` |
+| Custom AllReduce | Disabled |
+| GPU utilization / max batched tokens | 0.986 / 4096 |
+| Logged KV capacity | 252313 tokens; about 1.14× one configured request context |
 
-Branch: [`vllm-2080ti-definitive-0.2.x`](https://github.com/weicj/vLLM-2080Ti-Definitive/tree/vllm-2080ti-definitive-0.2.x)
-Release reference: [v0.2.2-post2](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.2-post2)
-Release history: [CHANGELOG.md](CHANGELOG.md)
+The shared KV allocator dynamically distributes blocks. Logged capacity is not a guarantee that two requests can each occupy their full 221184-token context at once. `MAX_NUM_SEQS=2` permits two scheduler slots; actual overlap also depends on request shape and available GDN/Mamba state. The portable route profile is [`profiles/2xCMP50HX/qwen27b/w4a16/dflash2-fp8kv-2x221K-text-image.env`](profiles/2xCMP50HX/qwen27b/w4a16/dflash2-fp8kv-2x221K-text-image.env). It contains route settings only, not private model paths, network configuration, or server launcher files.
 
-## 💡 Why RTX 2080 Ti For LLM Inference?
+## Recovered engine changes
 
-The project is built around a practical cost/performance premise: two 22 GB
-RTX 2080 Ti cards joined by NVLink provide 44 GB of VRAM, substantial memory
-bandwidth, and 136 Turing SMs. With an SM75-aware vLLM route, that is enough
-for serious local 27B and 35B-class serving rather than only small-model use.
+The snapshot includes scheduler admission and capacity diagnostics; multi-sequence GDN/Mamba reservation accounting; DFlash2 restored-prefix accounting and one-time draft block-table shifting; allocator failure diagnostics; partial JSON streaming handling; Qwen3 structured required/named tool-choice support; and recovered SM75 DFlash2 model paths. File-level inventory and provenance are in [PATCHES.md](PATCHES.md). Existing CUDA Graph, DFlash2=7, quantization, TP=2, and parser configuration were retained. No speedup is attributed to individual changes.
 
-| Metric | 2x RTX 2080 Ti 22 GB + NVLink | RTX 3090 Ti 24 GB baseline | Ratio |
-| --- | ---: | ---: | ---: |
-| Dedicated FP32 datapaths | 8,704 | 5,376 | 1.62x |
-| SM count | 136 | 84 | 1.62x |
-| Tensor Cores | 1,088 | 336 | 3.24x |
-| Dense FP16 matrix throughput | 228 TFLOPS | 160 TFLOPS | 1.43x |
-| Total memory bandwidth | 1,232 GB/s | 1,008 GB/s | 1.22x |
-| Total VRAM | 44 GB | 24 GB | 1.83x |
+## Evidence and limitations
 
-The fork turns those hardware properties into a usable serving stack through
-Marlin, FlashInfer/FlashQLA, TurboQuant/INT8 KV, MTP/DFlash2, and CUDA Graph support.
+Recorded runtime observations include two requests visible simultaneously as `running=2`, short overlapping streaming and tool-call requests, prefix reuse, and one isolated 30-minute coding-agent run (28 completed cycles and 84 tool calls) without a recorded runtime error or service restart. These are bounded acceptance observations, not an endurance guarantee. No PP/TG figures are published because metric provenance and semantics have not been independently validated for a benchmark. The full GPU lifecycle suite is incomplete.
 
-The supported hardware families also include two 16 GiB Tesla T10 GPUs over
-PCIe, with validated TP=2 Qwen 27B routes. The four-GPU Tesla T10 profiles
-target TP=4 serving; routes with a noted image-semantic failure remain explicitly
-marked as candidates.
+Known open items:
 
-## 🧩 Support Status
+- The cause of three reported host reboots on 2026-11-10 remains **UNKNOWN**. RAM/swap pressure was observed, but causation is unproven.
+- The DFlash2 cache-shift defect is not established as a cause of those reboots; its presence in the reboot-time source is also **UNKNOWN**.
+- GPU-level preemption/resume, complete GDN slot lifecycle, and CUDA Graph replay after slot reuse still need direct acceptance.
+- `tool_choice=required` combined with reasoning remains unstable.
+- CPU regression tests do not replace GPU lifecycle tests; a clean build has not been verified.
+- No performance comparison against Neith or other runtime is claimed.
 
-The current target environment is Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++ 15, CUDA 13.0, and PyTorch 2.13. For CUDA 12.8, PyTorch 2.11, older kernels, or GCC 12/13/14, refer to the `0.1.x` line, which is no longer actively maintained.
+## Build and checks
 
-Supported model routes and their measurements are listed in the corresponding
-hardware profile guides.
+The observed runtime environment included Python 3.12.14, PyTorch 2.13.0+cu130, Triton 3.7.1, FlashInfer 0.6.18.post1, `compressed-tensors` 0.17.0, Transformers 5.17.0, and NVIDIA driver 610.43.03. These are environment observations, not a complete lockfile. Runtime NCCL library version and `nvcc` availability were not verified. The production virtual environment did not contain `pip`.
 
-The launcher supports TP, PP, and mixed TP/PP inference; validated layouts
-include two RTX 2080 Ti GPUs with TP=2, two Tesla T10 GPUs with TP=2, and four
-Tesla T10 GPUs with TP=4.
+The repository retains `build.sh`, `PROJECT_RELEASE.env`, and `requirements/build/`, but a clean native build is **NOT VERIFIED**. Use an isolated build host and retain the complete build log. Do not copy production virtual environments, weights, runtime caches, or private paths into this repository.
 
-## 🧪 Tested Model Checkpoints
+Focused CPU regression checks and static/profile validation are recorded in [TEST-REPORT.md](TEST-REPORT.md). The profile validator checks profile structure, not GPU capacity or runtime startup.
 
-Current tested model and weight routes:
+## Attribution and license
 
-| Model route | Weight route | Model card | Recommended use | Profile path |
-| --- | --- | --- | --- | --- |
-| Qwen3.8 27B | FP8 | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | High-precision single-request inference | `qwen27b/w8a16` |
-| Qwen3.8 27B | NVFP4 | [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | Long-context concurrent inference | `qwen27b/w4a16` |
-| Qwen3.8 27B | INT4 (W4A16) | [RedHatAI/Qwen3.8-27B-INT4](https://huggingface.co/RedHatAI/Qwen3.8-27B-INT4) | 2xT10 MTP3 serving | `qwen27b/w4a16` |
-| Qwen3.x 35B | FP8 | [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8) | Fast personal inference | `qwen35b/w8a16` |
+The project-level license is Apache-2.0. Original vLLM, weicj, and third-party authors retain their copyright and authorship. Upstream license, attribution, SPDX, and acknowledgement material is preserved. The original credits section is retained verbatim in [UPSTREAM-CREDITS.md](UPSTREAM-CREDITS.md). See [LICENSE](LICENSE), [NOTICE](NOTICE), and [PATCHES.md](PATCHES.md). Third-party components remain subject to their own terms. The CMP50HX unlock is maintained separately by [xrip/cmp50hx-unlock](https://github.com/xrip/cmp50hx-unlock); GPU unlock and driver modifications are outside this project.
 
-## ⚡ Highlights
-
-| Hardware | Weight | Context / KV | 4K Prompt decode | 32K Prompt decode |
-| --- | --- | --- | ---: | ---: |
-| 2x RTX 2080 Ti | Qwen3.8 27B NVFP4 | 256K / FP8 KV | **220.84 tok/s** | **209.35 tok/s** |
-| 4x Tesla T10 | Qwen3.8 27B FP8 | 256K / FP16 KV | **191.89 tok/s** | **189.38 tok/s** |
-
-Both rows are single-request tests using DFlash2 (default K=7) and synthetic text inputs with high speculative-hit rates. Real-task throughput depends on draft acceptance and may not reach these figures.
-
-## 🚀 Build And Launch
-
-1. Build a new checkout:
-
-```bash
-git clone https://github.com/weicj/vLLM-2080Ti-Definitive.git
-cd vLLM-2080Ti-Definitive
-./build.sh
-```
-
-2. Update an existing checkout to the latest GitHub Release:
-
-```bash
-./update.sh
-```
-
-The update helper preserves local environments, dependency caches, logs,
-results, and `profiles/local`. It compares `VERSION` with the latest release,
-downloads the matching source archive, and offers to run `build.sh` after the
-refresh.
-
-3. Start and manage the service:
-
-```bash
-./launcher.sh
-```
-
-The interactive launcher selects target and DFlash draft checkpoints, applies a
-profile, configures GPU and TP/PP topology, chooses the launch mode and network
-settings, starts the service with health and smoke checks, and stops a running
-service.
-
-![launcher.sh interactive main menu](docs/assets/launcher-main-menu.png)
-
-For automated deployment, pass the configuration non-interactively:
-
-```bash
-MODEL_DIR=/path/to/checkpoint \
-PROFILE=2x2080Ti/qwen27b/w8a16/mtp4-fp8kv-1x262K-text-only.env \
-MODE=fast GPU_DEVICES=1,5 TP_SIZE=2 \
-NON_INTERACTIVE=1 ./launcher.sh
-```
-
-Use `./launcher.sh --print-config` to preview a route. See the
-[non-interactive launch guide](docs/non-interactive-launch.md) for automation.
-
-## 🧭 Profiles
-
-Read the [Profile Guide](profiles/README.md) for the layout and route fields.
-Detailed profiles and reference performance are listed for
-[2x2080Ti](profiles/2x2080Ti/README.md) and
-[2xT10](profiles/2xT10/README.md), and
-[4xT10](profiles/4xT10/README.md).
-
-Profiles use the flat layout `profiles/<hardware>/<model>/<weight>/<route>.env`.
-The launcher selects the startup mode and defaults to `MODE=fast`; the mode can
-also be set explicitly by the launcher or profile.
-
-Available modes:
-
-- `normal`: stable daily deployment mode.
-- `fast`: higher-performance mode for validated routes; this is the default mode.
-- `aggressive`: highest-performance mode with increased quality risk.
-- `safe`: conservative fallback for troubleshooting and compatibility.
-
-The profile selects only route parameters. The launcher owns GPU selection,
-port, target and draft model paths, chat template, and reasoning defaults.
-
-## 🛠️ Hardware Target
-
-- Two RTX 2080 Ti 22 GB GPUs connected by NVLink
-- Two 16 GiB Tesla T10 GPUs over PCIe (TP=2 profiles)
-- Four 16 GiB Tesla T10 GPUs over PCIe (TP=4 profiles)
-- NVIDIA Turing / SM75, with validated tensor parallel sizes 2 and 4
-- `0.2.x` target: CUDA 13.0, PyTorch 2.13, Python 3.12
-- Target host: Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++ 15
-
-Other Turing cards need independent validation for VRAM capacity, PCIe/NVLink
-topology, model head dimensions, KV-cache dtype, and CUDA Graph behavior.
-
-## ❓ Hardware Q&A
-
-**What GPU interconnect is required?**
-
-NVLink is recommended. PCIe P2P is the baseline requirement, but narrow PCIe
-links without NVLink are not a proven substitute for the validated topology.
-Confirm P2P and benchmark the actual host topology before treating it as a
-deployment route.
-
-**Does the host need a strong CPU or a lot of RAM?**
-
-A high-end CPU is not required, but modern single-core performance and low
-platform latency matter. More RAM mainly helps builds, downloads, and compile
-cache. Very old CPU platforms can lower decode throughput even when the GPUs
-are unchanged.
-
-**Can 11 GB and 22 GB Turing cards be mixed?**
-
-Not for the documented 27B/35B TP=2 routes. Tensor parallelism is effectively
-limited by the smaller rank. Better alternatives are paired high-VRAM TU102
-cards, such as TITAN RTX, Quadro RTX 6000, or Quadro RTX 8000, with NVLink or
-confirmed PCIe P2P and a separate profile validation.
-
-**Which CUDA and PyTorch versions apply?**
-
-The `0.2.x` target is CUDA 13.0 with PyTorch 2.13. For the older CUDA 12.8 /
-PyTorch 2.11 stack, refer to the unmaintained `v0.1.x` compatibility line. Keep
-the PyTorch CUDA build, toolkit, FlashInfer/FlashQLA build, and selected profile
-aligned; they are not interchangeable runtime combinations.
-
-**What other hardware risks matter?**
-
-Cooling, stable power delivery, and enough SSD capacity for weights and compile
-caches. Thermal throttling can look like a software performance regression,
-particularly during long prefill and repeated CUDA Graph/AOT compilation.
-
-## 🔗 Related Project
-
-- [2080Ti-LLM-Toolbox](https://github.com/weicj/2080Ti-LLM-Toolbox): companion
-  toolbox for dual-2080-Ti model routes, benchmark summaries, model notes, and
-  operational guidance. This repository focuses on the patched vLLM runtime.
-
-## 🙏 Credits And Upstream Projects
-
-This repository is a hardware-focused fork of
-[vLLM](https://github.com/vllm-project/vllm), licensed under Apache-2.0. It
-keeps the upstream project structure and adds local SM75 runtime patches,
-launch profiles, and dual-2080-Ti validation notes.
-
-Acceleration components used or integrated by this runtime include:
-
-- [vLLM](https://github.com/vllm-project/vllm): base inference engine and
-  serving stack.
-- [FlashInfer](https://github.com/flashinfer-ai/flashinfer): attention,
-  sampling, and quantized kernel paths used by vLLM.
-- [QwenLM/FlashQLA](https://github.com/QwenLM/FlashQLA): upstream Gated
-  DeltaNet / Qwen hybrid linear-attention implementation.
-- [weicj/FlashQLA-SM70-SM75](https://github.com/weicj/FlashQLA-SM70-SM75):
-  SM70/SM75 adaptation used by the validated Qwen prefill route.
-- TurboQuant, Marlin, CUTLASS, Triton, and related vLLM kernels.
-
-Upstream updates are re-evaluated within the SM75-specific scope of this fork.
+See [CONTRIBUTING.md](CONTRIBUTING.md), [AGENTS.md](AGENTS.md), and [CHANGELOG.md](CHANGELOG.md). Upstream changes are reviewed manually; there is no automatic merge into this project's `main`.
