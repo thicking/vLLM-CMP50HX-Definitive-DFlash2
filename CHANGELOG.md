@@ -1,3 +1,4 @@
+<!-- Downstream changes for vLLM-CMP50HX-Definitive-DFlash2; see PATCHES.md. -->
 # Changelog
 
 This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately from upstream vLLM releases.

@@ -6,6 +6,7 @@
 - Recovered Experimental B source: the production process working directory was checked through its systemd unit, active process argv, and `/proc/<pid>/cwd` on 2026-11-15. No runtime operation was performed for this import.
 - The server checkout was shallow and dirty. Its tracked working-tree diff against the base was 32 files, 882 insertions and 100 deletions. Four new regression tests and a separate untracked `profiles/2xT10/` directory were also present.
 - This repository imports those recovered changes as a single honest snapshot commit. Individual historical commits are not reconstructed. A complete source archive for the three 2026-11-10 reboot-time checkouts is unavailable; exact reboot-time contents and patch presence are **UNKNOWN**.
+- A later repository commit adds Apache-2.0 modified-file notices to the 32 changed existing files and labels the four recovered regression tests. These are comments/documentation only and do not change runtime behavior. `VERSION` is a single-value input that rejects comments, so its notice is in `VERSION.notice` and referenced by `NOTICE`.
 - The initial recovered `profiles/2xT10/` files were untracked in the production checkout. They are retained here, not attributed to this downstream project.
 
 ## Runtime and engine changes

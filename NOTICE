@@ -11,5 +11,9 @@ Recovered downstream modifications are listed in PATCHES.md. A listed file
 may contain both upstream material and downstream changes; listing it does not
 claim authorship of the entire file.
 
+The source snapshot changes the single-value `VERSION` file. Its parser does
+not permit inline comments, so the corresponding modified-file notice is in
+VERSION.notice.
+
 The CMP50HX unlock is maintained separately by its authors:
 https://github.com/xrip/cmp50hx-unlock

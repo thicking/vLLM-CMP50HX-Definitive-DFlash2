@@ -1,3 +1,4 @@
+# Downstream changes for vLLM-CMP50HX-Definitive-DFlash2; see PATCHES.md.
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json

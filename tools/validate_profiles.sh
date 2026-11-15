@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Downstream changes for vLLM-CMP50HX-Definitive-DFlash2; see PATCHES.md.
 set -euo pipefail
 
 ROOT=${STABLE_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}

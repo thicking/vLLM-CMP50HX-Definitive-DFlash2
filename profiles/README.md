@@ -1,3 +1,4 @@
+<!-- Downstream changes for vLLM-CMP50HX-Definitive-DFlash2; see PATCHES.md. -->
 # Profile Guide
 
 Language: English | [简体中文](README.zh-CN.md)

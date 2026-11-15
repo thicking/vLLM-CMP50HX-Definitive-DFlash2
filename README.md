@@ -1,3 +1,4 @@
+<!-- Downstream changes for vLLM-CMP50HX-Definitive-DFlash2; see PATCHES.md. -->
 # vLLM-CMP50HX-Definitive-DFlash2
 
 Language: English | [Русский](README.ru.md)
@@ -57,6 +58,6 @@ Focused CPU regression checks and static/profile validation are recorded in [TES
 
 ## Attribution and license
 
-The project-level license is Apache-2.0. Original vLLM, weicj, and third-party authors retain their copyright and authorship. Upstream license, attribution, SPDX, and acknowledgement material is preserved. The original credits section is retained verbatim in [UPSTREAM-CREDITS.md](UPSTREAM-CREDITS.md). See [LICENSE](LICENSE), [NOTICE](NOTICE), and [PATCHES.md](PATCHES.md). Third-party components remain subject to their own terms. The CMP50HX unlock is maintained separately by [xrip/cmp50hx-unlock](https://github.com/xrip/cmp50hx-unlock); GPU unlock and driver modifications are outside this project.
+The project-level license is Apache-2.0. Original vLLM, weicj, and third-party authors retain their copyright and authorship. Upstream license, attribution, SPDX, and acknowledgement material is preserved. The original credits section is retained verbatim in [UPSTREAM-CREDITS.md](UPSTREAM-CREDITS.md). See [LICENSE](LICENSE), [NOTICE](NOTICE), [VERSION.notice](VERSION.notice), and [PATCHES.md](PATCHES.md). Third-party components remain subject to their own terms. The CMP50HX unlock is maintained separately by [xrip/cmp50hx-unlock](https://github.com/xrip/cmp50hx-unlock); GPU unlock and driver modifications are outside this project.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [AGENTS.md](AGENTS.md), and [CHANGELOG.md](CHANGELOG.md). Upstream changes are reviewed manually; there is no automatic merge into this project's `main`.

@@ -1,3 +1,4 @@
+# Recovered Experimental B downstream test; see PATCHES.md.
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 

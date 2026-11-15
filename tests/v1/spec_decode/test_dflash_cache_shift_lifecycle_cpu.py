@@ -1,3 +1,4 @@
+# Recovered Experimental B downstream test; see PATCHES.md.
 # SPDX-License-Identifier: Apache-2.0
 """CPU regression for one-shot DFlash prefix-cache block-table shifting."""
 from types import SimpleNamespace

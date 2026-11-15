@@ -1,3 +1,4 @@
+# Recovered Experimental B downstream test; see PATCHES.md.
 # SPDX-License-Identifier: Apache-2.0
 """DFlash align-mode Mamba pools must reserve for configured concurrency."""
 from types import SimpleNamespace

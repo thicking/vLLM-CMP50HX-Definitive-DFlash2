@@ -10,21 +10,21 @@ Parser tests:
 
 ```text
 CUDA_VISIBLE_DEVICES= VLLM_ENFORCE_STRICT_TOOL_CALLING=0 python -m pytest -q --confcutdir=tests/parser/engine tests/parser/engine/test_qwen3_required_tool_choice.py tests/parser/engine/test_required_tool_streaming.py
-3 passed, 15 warnings in 0.56s
+3 passed, 15 warnings in 0.57s
 ```
 
 DFlash/KV tests:
 
 ```text
 CUDA_VISIBLE_DEVICES= VLLM_ENFORCE_STRICT_TOOL_CALLING=0 python -m pytest -q --confcutdir=tests/v1 tests/v1/core/test_dflash_mamba_concurrency_capacity.py tests/v1/spec_decode/test_dflash_cache_shift_lifecycle_cpu.py
-2 passed, 15 warnings in 7.23s
+2 passed, 15 warnings in 7.55s
 ```
 
 The exact cache-shift lifecycle test had previously failed on the unpatched source and passed after the narrow fix. It is CPU evidence; it does not establish CUDA Graph or GPU lifecycle correctness.
 
 ## Static and repository checks
 
-At import time, exact tracked diff comparison against the read-only production copy succeeded: SHA-256 `4e26a8087eb3c565e87d0ae7d74ea6056358260e1d01d30fd49c91b4066b687c`, 32 changed tracked files, 882 insertions, 100 deletions. Four additional untracked tests and the existing `profiles/2xT10/` material were copied separately and hash checked where applicable.
+At import time, exact tracked diff comparison against the read-only production copy succeeded: SHA-256 `4e26a8087eb3c565e87d0ae7d74ea6056358260e1d01d30fd49c91b4066b687c`, 32 changed tracked files, 882 insertions, 100 deletions. Four additional untracked tests and the existing `profiles/2xT10/` material were copied separately and hash checked where applicable. The manifest hashes the exact imported snapshot before the later comment-only Apache file notices.
 
 The final profile matrix and CMP50HX entry passed:
 

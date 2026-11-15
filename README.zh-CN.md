@@ -1,3 +1,4 @@
+<!-- Downstream changes for vLLM-CMP50HX-Definitive-DFlash2; see PATCHES.md. -->
 <!-- markdownlint-disable MD001 MD041 -->
 # ⚡ vLLM 2080 Ti Definitive Edition
 

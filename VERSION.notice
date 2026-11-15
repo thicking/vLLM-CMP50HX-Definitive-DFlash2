@@ -1,0 +1,1 @@
+Apache-2.0 modified-file notice: VERSION was changed in the recovered Experimental B snapshot. The file is a single-value input consumed verbatim by update.sh after whitespace removal, so adding an inline comment would corrupt version parsing. See PATCHES.md for provenance and the v0.1.0-alpha.1 downstream release.

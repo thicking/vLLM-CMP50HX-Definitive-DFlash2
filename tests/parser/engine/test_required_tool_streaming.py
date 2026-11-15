@@ -1,3 +1,4 @@
+# Recovered Experimental B downstream test; see PATCHES.md.
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Regression tests for required-tool partial JSON streaming."""
