@@ -1436,6 +1436,8 @@ class KVCacheGroupSpec:
     # source group after a connector load.
     enable_kv_transfer: bool = True
     role: KVCacheGroupRole = KVCacheGroupRole.DEFAULT
+    # Whether this group is an independent native DFlash draft KV pool.
+    is_dflash_draft_group: bool = False
 
 
 @dataclass

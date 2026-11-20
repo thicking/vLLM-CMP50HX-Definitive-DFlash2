@@ -41,7 +41,7 @@ required_keys=(
 allowed_key() {
   case "$1" in
     MODE|MODEL_FAMILY|MODEL_VARIANT|QUANTIZATION|KV_CACHE_DTYPE|MAX_MODEL_LEN|GPU_UTIL|\
-MAX_BATCHED_TOKENS|MAX_NUM_SEQS|MESSAGE_TYPE|SPECULATIVE_METHOD|SPECULATIVE_TOKENS|ENABLE_YARN)
+MAX_BATCHED_TOKENS|MAX_NUM_SEQS|DFLASH_DRAFT_POOL_CONCURRENCY|MESSAGE_TYPE|SPECULATIVE_METHOD|SPECULATIVE_TOKENS|ENABLE_YARN)
       return 0
       ;;
     *)
@@ -152,7 +152,6 @@ while IFS= read -r -d '' file; do
   if [[ -n "$max_batched_tokens" && ! "$max_batched_tokens" =~ ^[1-9][0-9]*$ ]]; then
     profile_error "$rel" "MAX_BATCHED_TOKENS must be a positive integer when present"
   fi
-
   gpu_util=$(read_profile_value "$file" GPU_UTIL)
   if ! awk -v value="$gpu_util" 'BEGIN { exit !(value ~ /^0([.][0-9]+)?$/ && value > 0 && value < 1) }'; then
     profile_error "$rel" "GPU_UTIL must be greater than 0 and lower than 1"
@@ -166,6 +165,17 @@ while IFS= read -r -d '' file; do
 
   speculative_method=$(read_profile_value "$file" SPECULATIVE_METHOD)
   speculative_tokens=$(read_profile_value "$file" SPECULATIVE_TOKENS)
+  dflash_pool_concurrency=$(read_profile_value "$file" DFLASH_DRAFT_POOL_CONCURRENCY)
+  max_num_seqs=$(read_profile_value "$file" MAX_NUM_SEQS)
+  if [[ -n "$dflash_pool_concurrency" ]]; then
+    if [[ ! "$dflash_pool_concurrency" =~ ^[1-9][0-9]*$ ]]; then
+      profile_error "$rel" "DFLASH_DRAFT_POOL_CONCURRENCY must be a positive integer"
+    elif [[ "$speculative_method" != "dflash" ]]; then
+      profile_error "$rel" "DFLASH_DRAFT_POOL_CONCURRENCY requires SPECULATIVE_METHOD=dflash"
+    elif [[ "$max_num_seqs" =~ ^[1-9][0-9]*$ ]] && (( dflash_pool_concurrency > max_num_seqs )); then
+      profile_error "$rel" "DFLASH_DRAFT_POOL_CONCURRENCY must be <= MAX_NUM_SEQS"
+    fi
+  fi
   profile_name=${rel##*/}
   if [[ "$profile_name" =~ mtp([0-9]+)- ]]; then
     mtp_label=${BASH_REMATCH[1]}

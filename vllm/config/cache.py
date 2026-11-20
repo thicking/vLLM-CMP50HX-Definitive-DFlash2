@@ -108,6 +108,10 @@ class CacheConfig:
     not matter if you have another vLLM instance running on the same GPU. For
     example, if you have two vLLM instances running on the same GPU, you can
     set the GPU memory utilization to 0.5 for each instance."""
+    dflash_draft_pool_concurrency: int | None = Field(default=None, ge=1)
+    """Optional minimum number of concurrent requests to size each native
+    DFlash draft KV pool for. ``None`` preserves the default proportional
+    cache sizing. The value must not exceed ``max_num_seqs``."""
     cache_dtype: CacheDType = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports

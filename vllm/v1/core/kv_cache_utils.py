@@ -1172,6 +1172,9 @@ def _dflash_group_capacities(
     available_memory: int,
 ) -> tuple[int, ...]:
     """Plan independent DFlash2 pools against the shared allocation budget."""
+    draft_pool_concurrency = _validate_dflash_draft_pool_concurrency(
+        vllm_config, kv_cache_groups
+    )
     requirements = [
         cdiv(
             group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
@@ -1180,8 +1183,101 @@ def _dflash_group_capacities(
         for group in kv_cache_groups
     ]
     page_bytes = [_group_page_bytes(group) for group in kv_cache_groups]
+
+    if draft_pool_concurrency is None:
+        return _calculate_dflash_group_capacities(
+            requirements, page_bytes, available_memory
+        )
+
+    default_required_bytes = sum(
+        req * page for req, page in zip(requirements, page_bytes, strict=True)
+    )
+    default_null_bytes = sum(page_bytes)
+    default_capacities = None
+    if default_required_bytes + default_null_bytes <= available_memory:
+        default_capacities = _calculate_dflash_group_capacities(
+            requirements, page_bytes, available_memory
+        )
+
+    for i, group in enumerate(kv_cache_groups):
+        if group.is_dflash_draft_group:
+            spec = group.kv_cache_spec
+            assert isinstance(spec, SlidingWindowSpec)
+            per_request_blocks = spec.max_admission_blocks_per_request(
+                max_in_flight_tokens=vllm_config.max_in_flight_tokens,
+                max_model_len=vllm_config.model_config.max_model_len,
+            )
+            requirements[i] = max(
+                requirements[i], per_request_blocks * draft_pool_concurrency
+            )
+
+    target_mamba_group_ids = [
+        i
+        for i, group in enumerate(kv_cache_groups)
+        if not group.is_dflash_draft_group
+        and any(
+            isinstance(spec, MambaSpec)
+            for spec in iter_layer_specs(group.kv_cache_spec)
+        )
+    ]
+
+    if target_mamba_group_ids and default_capacities is None:
+        raise ValueError(
+            "Workload-aware DFlash draft KV sizing cannot preserve the existing "
+            "target Mamba reservations within the available memory budget."
+        )
+
+    if target_mamba_group_ids:
+        # Keep target Mamba at exactly its prior per-rank capacity. Allocate
+        # the remaining shared backing budget across attention and draft pools.
+        fixed_mamba_bytes = sum(
+            default_capacities[i] * page_bytes[i]
+            for i in target_mamba_group_ids
+        )
+        flexible_group_ids = [
+            i for i in range(len(kv_cache_groups)) if i not in target_mamba_group_ids
+        ]
+        flexible_capacities = _calculate_dflash_group_capacities(
+            [requirements[i] for i in flexible_group_ids],
+            [page_bytes[i] for i in flexible_group_ids],
+            available_memory - fixed_mamba_bytes,
+        )
+        capacities = list(default_capacities)
+        for i, capacity in zip(
+            flexible_group_ids, flexible_capacities, strict=True
+        ):
+            capacities[i] = capacity
+        result = tuple(capacities)
+    else:
+        result = _calculate_dflash_group_capacities(
+            requirements, page_bytes, available_memory
+        )
+
+    draft_requirements = [
+        requirements[i]
+        for i, group in enumerate(kv_cache_groups)
+        if group.is_dflash_draft_group
+    ]
+    logger.info(
+        "Workload-aware DFlash draft KV sizing: concurrency=%d, "
+        "minimum usable blocks per draft pool=%s, group capacities=%s, "
+        "backing=%s GiB/rank.",
+        draft_pool_concurrency,
+        sorted(set(draft_requirements)),
+        result,
+        format_gib(sum(cap * page for cap, page in zip(result, page_bytes))),
+    )
+    return result
+
+
+def _calculate_dflash_group_capacities(
+    requirements: list[int], page_bytes: list[int], available_memory: int
+) -> tuple[int, ...]:
+    """Allocate DFlash pools proportionally while respecting per-pool minima."""
     null_bytes = sum(page_bytes)
-    required_bytes = sum(req * page for req, page in zip(requirements, page_bytes))
+    required_bytes = sum(
+        req * page for req, page in zip(requirements, page_bytes, strict=True)
+    )
     if required_bytes + null_bytes > available_memory:
         raise ValueError(
             "Insufficient memory for the requested DFlash2 KV cache groups: "
@@ -1213,6 +1309,62 @@ def _dflash_group_capacities(
         index = max(candidates, key=lambda i: page_bytes[i])
         capacities[index] -= 1
     return tuple(capacities)
+
+
+def _validate_dflash_draft_pool_concurrency(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int | None:
+    """Validate workload-aware sizing against the model's independent pools."""
+    concurrency = getattr(
+        vllm_config.cache_config, "dflash_draft_pool_concurrency", None
+    )
+    if concurrency is None:
+        return None
+    if not _uses_native_dflash2(vllm_config):
+        raise ValueError(
+            "dflash_draft_pool_concurrency requires native DFlash2 independent KV pools"
+        )
+    max_num_seqs = getattr(vllm_config.scheduler_config, "max_num_seqs", None)
+    if max_num_seqs is None or concurrency > max_num_seqs:
+        raise ValueError(
+            "dflash_draft_pool_concurrency must be <= scheduler max_num_seqs "
+            f"(got {concurrency} and {max_num_seqs})"
+        )
+    draft_groups = [group for group in kv_cache_groups if group.is_dflash_draft_group]
+    if not draft_groups or any(
+        not isinstance(group.kv_cache_spec, SlidingWindowSpec)
+        for group in draft_groups
+    ):
+        raise ValueError(
+            "dflash_draft_pool_concurrency requires identifiable SlidingWindowSpec "
+            "DFlash draft groups"
+        )
+    return concurrency
+
+
+def _validate_dflash_draft_pool_allocator_config(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> None:
+    """Reject allocator overrides for the real workload-aware pool plan.
+
+    Low-level KV-cache construction is also used by CUDA Graph profiling, which
+    temporarily sets ``num_gpu_blocks_override`` to allocate a minimal cache.
+    Validate this incompatibility only on the startup sizing path, not in that
+    reusable low-level builder.
+    """
+    concurrency = _validate_dflash_draft_pool_concurrency(
+        vllm_config, kv_cache_groups
+    )
+    if (
+        concurrency is not None
+        and vllm_config.cache_config.num_gpu_blocks_override is not None
+    ):
+        raise ValueError(
+            "dflash_draft_pool_concurrency cannot be combined with "
+            "num_gpu_blocks_override"
+        )
 
 
 def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
@@ -1757,6 +1909,7 @@ def get_kv_cache_config_from_groups(
     Returns:
         The generated KVCacheConfig
     """
+    _validate_dflash_draft_pool_concurrency(vllm_config, kv_cache_groups)
     if len(kv_cache_groups) == 0:
         # Attention free models do not have KV cache.
         # Return num_blocks=1 as BlockPool always needs a null_block.
@@ -2629,6 +2782,9 @@ def _try_get_dflash_native_groups(
     except (AssertionError, NotImplementedError, ValueError):
         return None
 
+    for draft_group in draft_groups:
+        draft_group.is_dflash_draft_group = True
+
     # DFlash also writes a speculative lookahead token, so only its cache
     # group needs EAGLE's trailing-block handling. Leaving all target groups
     # unmarked makes aligned Mamba prefix reuse impossible.
@@ -3027,6 +3183,8 @@ def _project_kv_cache_groups_to_worker(
                 worker_layer_names,
                 group_spec,
                 is_eagle_group=group.is_eagle_group and bool(worker_layer_names),
+                is_dflash_draft_group=group.is_dflash_draft_group
+                and bool(worker_layer_names),
             )
         )
     return projected_groups
@@ -3134,6 +3292,12 @@ def get_kv_cache_configs(
     # After this call, merged_kv_cache_specs may be modified in-place.
     global_kv_cache_groups = get_kv_cache_groups(vllm_config, merged_kv_cache_specs)
     independent_block_pools = _uses_native_dflash2(vllm_config)
+    # Only the real allocator sizing path rejects num_gpu_blocks_override.
+    # The low-level group builder is reused by CUDA Graph profiling, which
+    # temporarily sets that field to allocate a minimal capture cache.
+    _validate_dflash_draft_pool_allocator_config(
+        vllm_config, global_kv_cache_groups
+    )
 
     # If original_max_model_len was -1, automatically
     # determine the maximum model length that fits in available GPU memory.

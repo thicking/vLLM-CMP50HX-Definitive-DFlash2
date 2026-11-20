@@ -832,6 +832,7 @@ ROUTE_PROFILE_KEYS=(
   GPU_UTIL
   MAX_BATCHED_TOKENS
   MAX_NUM_SEQS
+  DFLASH_DRAFT_POOL_CONCURRENCY
   SPECULATIVE_METHOD
   SPECULATIVE_TOKENS
   MESSAGE_TYPE
@@ -847,6 +848,7 @@ PROFILE_RESET_KEYS=(
   GPU_UTIL
   MAX_BATCHED_TOKENS
   MAX_NUM_SEQS
+  DFLASH_DRAFT_POOL_CONCURRENCY
   SPECULATIVE_METHOD
   SPECULATIVE_TOKENS
   MESSAGE_TYPE
@@ -862,6 +864,7 @@ NON_INTERACTIVE_CONFIG_KEYS=(
   MODEL_DIR
   SERVED_NAME
   SPECULATIVE_MODEL
+  DFLASH_DRAFT_POOL_CONCURRENCY
   PER_REQUEST_SPEC_DECODE_METRICS
   PROFILE_DIR
   PROFILE
@@ -1175,7 +1178,7 @@ reset_route_profile_fields() {
 profile_key_is_allowed() {
   case "$1" in
 MODE|MODEL_FAMILY|MODEL_VARIANT|QUANTIZATION|KV_CACHE_DTYPE|ENABLE_YARN|MAX_MODEL_LEN|GPU_UTIL|\
-MAX_BATCHED_TOKENS|MAX_NUM_SEQS|SPECULATIVE_METHOD|SPECULATIVE_TOKENS|MESSAGE_TYPE)
+MAX_BATCHED_TOKENS|MAX_NUM_SEQS|DFLASH_DRAFT_POOL_CONCURRENCY|SPECULATIVE_METHOD|SPECULATIVE_TOKENS|MESSAGE_TYPE)
       return 0
       ;;
     *)
@@ -1381,6 +1384,7 @@ save_manager_state() {
     printf 'GPU_UTIL=%q\n' "${GPU_UTIL:-}"
     printf 'MAX_BATCHED_TOKENS=%q\n' "${MAX_BATCHED_TOKENS:-}"
     printf 'MAX_NUM_SEQS=%q\n' "${MAX_NUM_SEQS:-}"
+    printf 'DFLASH_DRAFT_POOL_CONCURRENCY=%q\n' "${DFLASH_DRAFT_POOL_CONCURRENCY:-}"
     printf 'LONG_PREFILL_TOKEN_THRESHOLD=%q\n' "${LONG_PREFILL_TOKEN_THRESHOLD:-}"
     printf 'MTP_K=%q\n' "${MTP_K:-}"
     printf 'SPECULATIVE_METHOD=%q\n' "${SPECULATIVE_METHOD:-}"
@@ -2021,6 +2025,7 @@ profile_summary() {
     GPU_UTIL
     MAX_BATCHED_TOKENS
     MAX_NUM_SEQS
+    DFLASH_DRAFT_POOL_CONCURRENCY
     NO_ASYNC_SCHEDULING
     MTP_K
     SPECULATIVE_METHOD
@@ -2978,6 +2983,7 @@ save_current_profile_menu() {
   write_profile_entry "$target_file.tmp" GPU_UTIL "${GPU_UTIL:-}"
   write_profile_entry "$target_file.tmp" MAX_BATCHED_TOKENS "${MAX_BATCHED_TOKENS:-}"
   write_profile_entry "$target_file.tmp" MAX_NUM_SEQS "${MAX_NUM_SEQS:-}"
+  write_profile_entry "$target_file.tmp" DFLASH_DRAFT_POOL_CONCURRENCY "${DFLASH_DRAFT_POOL_CONCURRENCY:-}"
   write_profile_entry "$target_file.tmp" SPECULATIVE_METHOD "${SPECULATIVE_METHOD:-none}"
   write_profile_entry "$target_file.tmp" SPECULATIVE_TOKENS "$(effective_speculative_tokens)"
   write_profile_entry "$target_file.tmp" MESSAGE_TYPE "${MESSAGE_TYPE:-text-only}"
@@ -4367,6 +4373,23 @@ PY
 validate_speculative_route() {
   local method tokens backend json_status draft_sample_method
 
+  if [[ -n "${DFLASH_DRAFT_POOL_CONCURRENCY:-}" ]]; then
+    if [[ ! "$DFLASH_DRAFT_POOL_CONCURRENCY" =~ ^[1-9][0-9]*$ ]]; then
+      echo "ERROR: DFLASH_DRAFT_POOL_CONCURRENCY must be a positive integer." >&2
+      return 1
+    fi
+    if [[ ! "${MAX_NUM_SEQS:-}" =~ ^[1-9][0-9]*$ ]] || \
+       (( DFLASH_DRAFT_POOL_CONCURRENCY > MAX_NUM_SEQS )); then
+      echo "ERROR: DFLASH_DRAFT_POOL_CONCURRENCY must be <= MAX_NUM_SEQS." >&2
+      return 1
+    fi
+    method=$(effective_speculative_method)
+    if [[ "$method" != "dflash" ]]; then
+      echo "ERROR: DFLASH_DRAFT_POOL_CONCURRENCY requires SPECULATIVE_METHOD=dflash." >&2
+      return 1
+    fi
+  fi
+
   if [[ -n "${SPECULATIVE_CONFIG:-}" ]]; then
     if [[ -n "${SPECULATIVE_METHOD:-}" || -n "${SPECULATIVE_TOKENS:-}" || -n "${SPECULATIVE_DRAFT_TP_SIZE:-}" || -n "${SPECULATIVE_MAX_MODEL_LEN:-}" || -n "${SPECULATIVE_ATTENTION_BACKEND:-}" || -n "${SPECULATIVE_KV_CACHE_DTYPE:-}" || -n "${SPECULATIVE_DRAFT_SAMPLE_METHOD:-}" ]] || config_key_has_explicit_value SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH || config_key_has_explicit_value SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION || ([[ "${MTP_K:-0}" =~ ^[0-9]+$ ]] && (( MTP_K > 0 ))); then
       echo "ERROR: SPECULATIVE_CONFIG must not be mixed with shortcut speculative fields or MTP_K." >&2
@@ -4692,6 +4715,9 @@ build_args() {
 
   if [[ -n "${LONG_PREFILL_TOKEN_THRESHOLD:-}" ]]; then
     VLLM_ARGS+=(--long-prefill-token-threshold "$LONG_PREFILL_TOKEN_THRESHOLD")
+  fi
+  if [[ -n "${DFLASH_DRAFT_POOL_CONCURRENCY:-}" ]]; then
+    VLLM_ARGS+=(--dflash-draft-pool-concurrency "$DFLASH_DRAFT_POOL_CONCURRENCY")
   fi
   if [[ "${PREFILL_BATCH_BARRIER:-0}" == "1" ]]; then
     VLLM_ARGS+=(--prefill-batch-barrier)
@@ -5823,6 +5849,7 @@ Launch summary:
   GPU util:             $GPU_UTIL
   Max batched tokens:   $MAX_BATCHED_TOKENS
   Max sequences:        $MAX_NUM_SEQS
+  DFlash draft pools:   ${DFLASH_DRAFT_POOL_CONCURRENCY:-default}
   Prefill threshold:    ${LONG_PREFILL_TOKEN_THRESHOLD:-auto}
   Prefill batch barrier: ${PREFILL_BATCH_BARRIER:-0} (automatic for max sequences > 1)
   CUDA graph captures:  $(current_cudagraph_capture_label)
