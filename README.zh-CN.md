@@ -6,6 +6,8 @@
 
 语言：[English](README.md) | 简体中文
 
+此公开派生仓库另行发布 `v0.2.0-alpha.1`，名称为 **Workload-aware KV Cache & Parallel Inference**。这只是下游项目版本；本页所述上游 fork 基线 `v0.2.2-post2` 保持不变。请查看[英文说明](README.md)、[俄文说明](README.ru.md)和[发布记录](CHANGELOG.md)。
+
 面向双 RTX 2080 Ti 及其他 SM75 GPU 的 vLLM 专用推理运行时，包括 Tesla
 T10/T40/T4、TITAN RTX 和 Quadro RTX 6000/8000。
 

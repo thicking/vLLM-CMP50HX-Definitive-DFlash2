@@ -1,7 +1,68 @@
 <!-- Downstream documentation for vLLM-CMP50HX-Definitive-DFlash2; see PATCHES.md. -->
 # Experimental B validation record
 
-Record date: 2026-11-15. This report separates runtime validation of the recovered Experimental B working tree from clean-build reproducibility of the published checkout and from GPU scenarios that remain open. Experimental B was exercised on the production two-CMP50HX host; it is incorrect to characterize the validation as CPU-only.
+## v0.2.0-alpha.1 release verification — 2026-11-20
+
+### Targeted CPU regressions
+
+The first harness attempt failed before six tests reached their assertions because CPU platform selection was left at `auto` and this host has no accelerator. No implementation defect was established by that attempt. After setting `VLLM_TARGET_DEVICE=cpu`, the same focused set passed:
+
+```text
+VLLM_TARGET_DEVICE=cpu CUDA_VISIBLE_DEVICES= VLLM_ENFORCE_STRICT_TOOL_CALLING=0 \
+  python -m pytest -q --confcutdir=tests/v1 \
+  tests/v1/metrics/test_stats.py tests/v1/core/test_scheduler.py \
+  tests/v1/core/test_kv_cache_utils.py tests/v1/engine/test_engine_args.py \
+  -k 'live_prefill_prometheus or live_prefill_metrics or prefill_barrier_does_not_promote_waiters_past_blocked_fifo_head or dflash_workload_pool_sizing or dflash_workload_sizing_rejects_explicit_allocator_override or dflash_draft_pool_concurrency_from_cli'
+9 passed, 305 deselected, 15 warnings in 25.44s
+```
+
+The selected tests cover live prefill telemetry without output tokens, mixed prefill/decode and cancellation accounting, the multi-waiter barrier livelock reproducer, workload-aware allocator lifecycle/fail-closed behavior, and CLI parsing of the new setting. This was a targeted CPU run, not the full upstream suite and not GPU acceptance.
+
+Additional release checks:
+
+```text
+bash -n build.sh launcher.sh tools/validate_profiles.sh tests/standalone_tests/launcher_profile_schema.sh tests/standalone_tests/profile_validator.sh
+bash tools/validate_profiles.sh
+profile_validation_ok total=28
+bash tests/standalone_tests/launcher_profile_schema.sh
+launcher_profile_schema_ok
+bash tests/standalone_tests/profile_validator.sh
+profile_validator_ok
+py_compile_pass files=17
+```
+
+`launcher.sh --print-config` was also run with the CMP50HX route and `fast` mode in a temporary, non-serving harness. It printed context 221184, max batched tokens 4096, max sequences 2, draft-pool concurrency 2, CUDA graph captures 8/16, and DFlash/7; no server was started. `git diff --check` passed.
+
+### GP-21.3 production GPU acceptance carried into this release
+
+Tested route: 2 × CMP50HX 20 GiB, SM75, PCIe Gen2 x16, TP2, Swift Qwen3.8-27B AWQ, DFlash2 K=7, target FP8 KV/draft FP16 KV, context 221184, `max_num_seqs=2`, Mamba align, CUDA Graphs, prefix caching, Custom AllReduce OFF.
+
+| Prompt pair | TTFT | Output tokens | TG per request |
+| --- | --- | --- | --- |
+| 20,971 + 20,968 | 45.597 / 46.843 s | 1,353 / 1,494 | 58.34 / 59.47 tok/s |
+| 32,012 + 32,011 | 70.37 / 71.22 s | 2 / 2 | NOT MEASURED |
+| 64,004 + 64,003 | 147.44 / 149.35 s | 2 / 2 | NOT MEASURED |
+| 95,996 + 95,995 | 245.92 / 246.69 s | 2 / 2 | NOT MEASURED |
+| 199,990 + 16,000 | 346.38 / 344.96 s | 2 / 2 | NOT MEASURED |
+
+Only the 21K pair performed substantial decode. The individual TG values sum to 117.81 tok/s, not a separately measured aggregate throughput. The earlier pair of ~21K prompts had TTFT 22.9 / 44.4 s and `running=1`, `waiting=1`; the candidate reached two active prefills, but its first-request TTFT was higher. No prefill speedup or comparable end-to-end throughput gain is established. The 32K–200K rows are admission/prefill checks with two output tokens each.
+
+The reported cache vector changed from `[23,23,23,154,10,10,10,10,10]` to `[23,23,23,151,18,18,18,18,18]`. Draft pool capacity increased 80% per group; target attention capacity decreased about 1.95%; configured max context stayed 221184. The scalar reported KV capacity changed 252313→247398 tokens. A 7,980-token identical repeat reported 4,944 cached tokens.
+
+### Production source comparison
+
+Read-only SHA-256 comparison covered ten changed Python runtime files. Seven files matched byte-for-byte. `sched/output.py`, `metrics/loggers.py`, and `metrics/stats.py` differed only in comments/docstring formatting or the downstream modified-file notice; direct diffs confirmed executable code is the same. Exact hashes are in [`manifests/gp22-production-source-review.md`](manifests/gp22-production-source-review.md). No production configuration, service, or runtime was changed or restarted for GP-22.
+
+### Security and package checks
+
+- Gitleaks over all newly added commits from `origin/main` to the release candidate: **0 findings** (100% redacted output mode).
+- Manual added-line scan for absolute user/host paths, private IPs/hostnames, credential markers, prompts, and internal mounts: **0 matches**.
+- The published diff contains no production logs, model weights, virtual environments, CUDA binaries, caches, backups, or private launcher/service configuration.
+- `README.md`, `README.ru.md`, `README.zh-CN.md`, `CHANGELOG.md`, `VERSION`, and the `pyproject.toml` fallback identify the downstream release consistently; inherited `PROJECT_RELEASE.env` runtime identity stays `0.2.2-post2`.
+
+The clean build/install from the public GitHub checkout remains **NOT VERIFIED**. Full upstream tests, extended GPU endurance, full GDN lifecycle, GPU preemption/resume, CUDA Graph replay after slot reuse, HTTP client cancellation completion, and an apples-to-apples aggregate decode benchmark remain **NOT VERIFIED**. GPU data above comes from the earlier GP-21.3 production acceptance window; no benchmark or runtime restart was performed for this release task.
+
+Historical runtime validation record date: 2026-11-15. This report separates runtime validation of the recovered Experimental B working tree from clean-build reproducibility of the published checkout and from GPU scenarios that remain open. Experimental B was exercised on the production two-CMP50HX host; it is incorrect to characterize the validation as CPU-only.
 
 ## Runtime validation on the two-CMP50HX host
 
@@ -68,7 +129,7 @@ Python compilation of the changed scheduler/KV/speculator modules passed. `git d
 
 Gitleaks scanned the working tree and full Git history using redacted JSON reports. The working-tree scan reported 12 heuristic hits; the full-history scan reported 99 hits across 24 commits. Reviewed sanitized metadata classified them as generic `key` identifiers/fields, token-count parameters, model identifiers, and documentation examples with a redacted bearer placeholder. Reported secret fields were `REDACTED`; no credential value was exposed or identified in that review. Gitleaks exits nonzero on these findings: this is a reviewed-finding result, **not a clean zero-finding scan**.
 
-No GPU workload was started as part of extracting and publishing the repository. The runtime and GPU observations in this report are from the preceding GP-12 Experimental B validation; production was not restarted or modified for repository publication.
+No GPU workload was started as part of GP-22 release verification. The recorded GP-12 and GP-21.3 runtime/GPU observations came from their earlier authorized validation windows; production was not restarted or modified for repository publication.
 
 ## Remaining regression coverage — not verified
 

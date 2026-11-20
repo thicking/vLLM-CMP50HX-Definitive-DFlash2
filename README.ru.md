@@ -3,21 +3,21 @@
 
 Язык: [English](README.md) | Русский
 
-Самостоятельно сопровождаемая производная сборка [vLLM](https://github.com/vllm-project/vllm) и [weicj/vLLM-2080Ti-Definitive](https://github.com/weicj/vLLM-2080Ti-Definitive). В этом снимке сохранены восстановленный Experimental B runtime и изменения GP-12 для scheduler, KV/GDN состояния, DFlash2, parser и регрессионных тестов.
+Самостоятельно сопровождаемая производная сборка [vLLM](https://github.com/vllm-project/vllm) и [weicj/vLLM-2080Ti-Definitive](https://github.com/weicj/vLLM-2080Ti-Definitive). В этом снимке сохранены восстановленный Experimental B runtime и downstream-изменения GP-12, GP-20, GP-21.1 и GP-21.3 для SM75/CMP50HX, а также соответствующие регрессионные тесты.
 
 Это не новый inference engine. Авторы vLLM, weicj и авторы сторонних компонентов сохраняют авторство своей работы. См. [LICENSE](LICENSE), [NOTICE](NOTICE) и [PATCHES.md](PATCHES.md).
 
 ## Статус проекта
 
-Это экспериментальный релиз исходников `v0.1.0-alpha.1`. Git-тег проекта не зависит от версии Python-пакета vLLM (`0.2.3.dev0+g2d63e2e32.d20260928.cu130`) и upstream fork (`v0.2.2-post2`). Готовые wheel и container image не публикуются. Сборка из чистого checkout ещё не проверялась на CMP50HX.
+Это экспериментальный релиз исходников [`v0.2.0-alpha.1`](https://github.com/thicking/vLLM-CMP50HX-Definitive-DFlash2/releases/tag/v0.2.0-alpha.1) под названием **Workload-aware KV Cache & Parallel Inference**. Тег относится к этой производной; унаследованная версия исходников upstream fork остаётся `v0.2.2-post2`. Готовые wheel и container image не публикуются. Чистая сборка и установка из этого репозитория на CMP50HX не проверялись.
 
-Импорт соответствует восстановленному Experimental B на базе upstream-fork commit `2d63e2e322b7488776d1fb822f3556dbd7334116`. Исходное дерево было shallow и dirty; локальные изменения импортированы одним snapshot-коммитом, без искусственной истории патчей. Полное дерево исходников на момент перезагрузок сервера 10 ноября 2026 года отсутствует, поэтому присутствие всех восстановленных изменений во время этих событий — **UNKNOWN**.
+Первоначальный снимок Experimental B основан на upstream-fork commit `2d63e2e322b7488776d1fb822f3556dbd7334116`. Исходное дерево было shallow и dirty; локальные изменения импортированы одним snapshot-коммитом, без искусственной истории патчей. Последующие коммиты GP-20, GP-21.1 и GP-21.3 сохранены в истории релиза. Полное дерево исходников на момент перезагрузок сервера 10 ноября 2026 года отсутствует, поэтому наличие каждого восстановленного изменения в тот момент — **UNKNOWN**.
 
 ## Оборудование и проверенная конфигурация runtime
 
 Проверенная текущая конфигурация: **2 × NVIDIA CMP 50HX 20 GB**, Turing TU102 / SM75, TP=2 на GPU0/1.
 
-| Параметр | Конфигурация восстановленного Experimental B |
+| Параметр | Проверенная конфигурация GP-21.3 |
 | --- | --- |
 | Target | Swift Qwen3.8-27B AWQ, `compressed-tensors` |
 | Draft | DFlash2 GPTQ INT8, TP=2 |
@@ -32,7 +32,7 @@
 | Целевое GPU utilization при старте | 0.986 |
 | Max batched tokens | 4 096 |
 
-Логи запуска этой конфигурации сообщали KV capacity 252 313 токенов (около 1,14× настроенного контекста одного запроса). KV распределяется между запросами динамически. Это **не** означает, что два запроса могут одновременно занять по 221 184 токена каждый. `MAX_NUM_SEQS=2` разрешает два scheduler slot; параллельный запуск также зависит от формы запросов и независимых GDN/Mamba state pools.
+После GP-21.3 лог allocator сообщил KV capacity 247 398 токенов (около 1,12× настроенного контекста одного запроса; ранее было 252 313). KV распределяется между запросами динамически. Это **не** означает, что два запроса могут одновременно занять по 221 184 токена каждый. `MAX_NUM_SEQS=2` разрешает два scheduler slot; параллельный запуск также зависит от формы запросов и независимых GDN/Mamba state pools.
 
 Переносимый route preset: [`profiles/2xCMP50HX/qwen27b/w4a16/dflash2-fp8kv-2x221K-text-image.env`](profiles/2xCMP50HX/qwen27b/w4a16/dflash2-fp8kv-2x221K-text-image.env). В нём только параметры route. Пути к target/draft checkpoint, выбор GPU, сеть и cache directories задавайте через окружение существующего launcher. До старта просмотрите итоговую конфигурацию: `./launcher.sh --print-config`.
 
@@ -48,6 +48,50 @@
 - **Streaming parser:** `IndexError` для незавершённого partial-JSON фрагмента считается неполным префиксом потока.
 - **Qwen3 tool parser:** добавлена поддержка структурированного required/named tool-choice пути. Сочетание reasoning с `tool_choice=required` остаётся нестабильным и не считается исправленным.
 - **SM75 DFlash2:** сохранены восстановленные GPTQ/Marlin projection paths и Turing-специфичные DFlash2 kernels. Часть этих оптимизаций появилась до GP-12; происхождение описано в [PATCHES.md](PATCHES.md).
+
+## Изменения v0.2.0-alpha.1
+
+- **Live prefill telemetry (GP-20):** добавлен накопительный счётчик, экспортируемый как `vllm:prefill_computed_tokens_total`, а также `vllm:num_requests_prefilling` и `vllm:prefill_tokens_remaining`. Счётчик растёт только после успешно завершённых локальных prefill-операций. Prefix-cache и external-KV токены, decode и speculative verification не считаются; фактически повторно вычисленные токены после preemption учитываются. Семантика прежних prompt-token counters не менялась.
+- **Корректность prefill barrier (GP-21.1):** более поздний waiter, который пока нельзя принять, больше не расширяет alignment frontier после отказа KV allocator для более ранней FIFO-заявки. Активная prefill cohort может продолжить обработку; отказанный head повторяется после завершения cohort. Исправление сохраняет prefill barrier и `full_sequence_must_fit`.
+- **Ограниченная scheduler-диагностика (GP-21.1):** ограничивает объём per-request состояния, подавляет неизменные повторы с backoff и сразу показывает изменения состояния и восстановление. Решения scheduler не меняются.
+- **Workload-aware DFlash2 pools (GP-21.3):** добавлен opt-in параметр `dflash_draft_pool_concurrency`. При его включении allocator использует фактические cache specs, физические размеры страниц, доступный объём памяти и заданную concurrency draft, сохраняя резервы target Mamba. Значение `None` сохраняет прежнее пропорциональное распределение.
+
+### Параметр draft pool
+
+Точный CLI-параметр vLLM: `--dflash-draft-pool-concurrency N`; имя параметра в профиле/launcher — `DFLASH_DRAFT_POOL_CONCURRENCY=N`. `N` — целое число ≥1 и не больше scheduler `max_num_seqs`. Настройка применяется только для native DFlash2 с независимыми KV pools и определяемыми группами DFlash `SlidingWindowSpec`. Если параметр не задан, используется прежнее распределение. Явный пользовательский `num_gpu_blocks_override` несовместим с workload-aware планом. Проверка выполняется при реальном sizing cache; временный внутренний override для CUDA Graph profiling поддерживается.
+
+Для уже настроенной native DFlash2 команды `vllm serve` добавьте:
+
+```bash
+--dflash-draft-pool-concurrency 2
+```
+
+Соответствующая форма profile:
+
+```dotenv
+MAX_NUM_SEQS=2
+DFLASH_DRAFT_POOL_CONCURRENCY=2
+```
+
+Параметр задаёт sizing draft pools, а не увеличивает лимит запросов scheduler. Распределение зависит от модели, cache layout и оборудования. Скалярный KV headline не описывает независимые capacities, размеры страниц, выравнивание и резервы hybrid Mamba/attention/draft groups. Вектор CMP50HX ниже относится только к проверенному маршруту и не является универсальным preset.
+
+### GPU acceptance GP-21.3
+
+На проверенном маршруте с двумя CMP50HX распределение cache groups изменилось с `[23,23,23,154,10,10,10,10,10]` на `[23,23,23,151,18,18,18,18,18]`. Ёмкость каждого из пяти draft pools выросла на 80% (10→18 блоков); target full-attention capacity уменьшилась примерно на 1,95% (154→151). Настроенный контекст одного запроса остался 221184. Скалярная KV capacity в логах изменилась с 252313 до 247398 токенов (−4915, около −1,95%); это не гарантирует одновременное размещение двух полностью заполненных контекстов.
+
+| Параллельные prompts, токены | TTFT каждого запроса |
+| --- | --- |
+| 20 971 + 20 968 | 45,597 / 46,843 с |
+| 32 012 + 32 011 | 70,37 / 71,22 с |
+| 64 004 + 64 003 | 147,44 / 149,35 с |
+| 95 996 + 95 995 | 245,92 / 246,69 с |
+| 199 990 + 16 000 | 346,38 / 344,96 с |
+
+Пара около 21K сгенерировала 1353 / 1494 токена со скоростью 58,34 / 59,47 ток/с на запрос. Сумма индивидуальных скоростей — 117,81 ток/с — **не** является отдельно измеренной aggregate throughput. В остальных длинных сценариях генерировалось по два токена на запрос; это проверка admission/prefill, а не полезной длительной генерации. В baseline два запроса примерно по 21K получили TTFT 22,9 / 44,4 с при `running=1`, `waiting=1` и последовательном prefill. Candidate подтверждает перекрытие двух запросов, но TTFT первого запроса выше в этом сравнении; ускорение prefill или общий сопоставимый прирост decode throughput не доказаны. Идентичный повтор запроса длиной 7980 токенов показал 4944 cached tokens. Полные условия и ограничения приведены в [TEST-REPORT.md](TEST-REPORT.md).
+
+### Причина scheduler livelock
+
+Сокращённый CPU reproducer выявил livelock FIFO/frontier: allocator отклоняет head очереди, blocked-marker исключает его из alignment frontier, более поздний недоступный waiter всё ещё влияет на frontier, активный prefill не продвигается, и scheduler возвращает пустой batch. Regression воспроизводился на исходниках Definitive v0.2.2, post2 и post3. Патч запрещает продвигать frontier за отклонённый head, пока работает активная cohort; barrier и `full_sequence_must_fit` не отключаются. Этот дефект отличается от более раннего Mamba-alignment livelock fix в upstream fork. Предложенный патч и текст issue находятся в [`upstream-proposals/`](upstream-proposals/); они ещё не отправлялись.
 
 CUDA Graphs, DFlash2=7, target/draft quantization, TP=2 и parser configuration сохранены. Production graph capture проходил при запуске восстановленной B; clean checkout ещё не собирался, поэтому воспроизводимость graph capture из опубликованного исходника пока не подтверждена.
 

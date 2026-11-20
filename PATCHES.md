@@ -59,11 +59,25 @@ portion. Its CPU regressions cover chunked prefill without output tokens,
 mixed prefill/decode, prefix and external KV, preemption/resume, cancellation,
 and Prometheus publication without iteration output.
 
+The Prometheus client registers the counter internally as
+`vllm:prefill_computed_tokens`; the text exposition name is
+`vllm:prefill_computed_tokens_total`. The gauges are
+`vllm:num_requests_prefilling` and `vllm:prefill_tokens_remaining`. These are
+live scheduler/engine metrics; they do not rewrite the existing completed
+request counters or add a model-runner synchronization.
+
 ## GP-21.3: workload-aware DFlash draft pools (2026-11-20)
 
 - Adds opt-in `dflash_draft_pool_concurrency` /
   `--dflash-draft-pool-concurrency`; unset preserves proportional sizing.
   The active B profile opts in with `DFLASH_DRAFT_POOL_CONCURRENCY=2`.
+- The value is an integer ≥1, no greater than scheduler `max_num_seqs`, and
+  applies only to native DFlash2 independent pools with identifiable
+  `SlidingWindowSpec` draft groups. It sizes each draft pool from actual cache
+  specs, physical page bytes, in-flight demand/context, and the shared
+  available-memory budget; target Mamba reservations remain intact. An
+  explicit user `num_gpu_blocks_override` is rejected for this plan, while
+  CUDA Graph profiling's temporary internal override remains supported.
 - Marks native draft groups from their actual cache specs and sizes each
   independent DFlash pool from its `SlidingWindowSpec`, context, in-flight
   demand, and shared physical byte budget. Existing target Mamba reservations
@@ -138,7 +152,20 @@ Recovered dirty-tree changes include `launcher.sh`, `build.sh`, `PROJECT_RELEASE
 
 The recovered B route is documented in `profiles/2xCMP50HX/qwen27b/w4a16/dflash2-fp8kv-2x221K-text-image.env`: context 221184, sequence limit 2, FP8 target KV, DFlash/7, GPU util 0.986 and max batched tokens 4096. This is a configuration export, not a promise of two full contexts. Four untracked 2xT10 profiles and their hardware notes were also preserved from the recovered source tree.
 
-The existing upstream changelog/history is retained. The independent Git release tag is `v0.1.0-alpha.1`; the Python package version and the upstream-fork version are unchanged by that tag.
+The upstream changelog and history are retained. The independent downstream
+release tag is `v0.2.0-alpha.1`; the inherited runtime-manager source identity
+remains `0.2.2-post2`. The Python package version follows the downstream tag
+when built from Git; no wheel is published. `PROJECT_RELEASE.env` retains the
+inherited fork identity because the launcher/build flow uses it separately.
+
+## GP-21.1 upstream proposal
+
+The minimal patch and English issue draft are under `upstream-proposals/`.
+They contain only the FIFO prefill-frontier regression test and scheduler
+guard, are based on the upstream `v0.2.2-post3` tree, and apply cleanly to
+`v0.2.2`, `v0.2.2-post2`, `v0.2.2-post3`, and the checked local upstream
+`main` ref. They have not been submitted to the original repository. The
+earlier upstream Mamba-alignment livelock fix is separate and is not included.
 
 ## Checks and unresolved items
 

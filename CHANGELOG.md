@@ -3,6 +3,27 @@
 
 This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately from upstream vLLM releases.
 
+## v0.2.0-alpha.1 - 2026-11-20 (independent downstream project)
+
+**Workload-aware KV Cache & Parallel Inference** — experimental source
+prerelease for the validated dual-CMP50HX route.
+
+- Adds GP-20 live prefill-compute telemetry, published only after successful
+  execution steps and excluding cached/external tokens, decode, and speculative
+  verification.
+- Fixes the GP-21.1 multi-waiter prefill-barrier livelock while preserving FIFO
+  admission, the barrier, and full-sequence allocator checks; bounds scheduler
+  diagnostic state and repeated logs.
+- Adds opt-in GP-21.3 workload-aware DFlash2 draft-pool sizing based on cache
+  specifications, page sizes, available memory, and requested concurrency.
+- Includes target CPU regression tests, the two-CMP50HX acceptance record, and
+  a separately prepared, unpublished upstream proposal.
+- Remains a prerelease: clean build from the public checkout, complete GPU
+  lifecycle/endurance, HTTP cancellation completion, and comparable decode
+  throughput are not verified. No wheel or container image is published.
+- The repository tag is independently versioned; the inherited runtime
+  manager identity remains `v0.2.2-post2`.
+
 ## v0.1.0-alpha.1 - 2026-11-15 (independent downstream project)
 
 - Publishes the recovered Experimental B source snapshot for the CMP50HX route
