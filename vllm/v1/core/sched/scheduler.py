@@ -668,13 +668,19 @@ class Scheduler(SchedulerInterface):
                 - self.num_waiting_for_streaming_input,
                 0,
             )
-            if available_slots and barrier_has_running_prefill:
+            # An allocator-rejected waiter remains ahead of later requests in
+            # the admission queue. Do not promote later waiters into the
+            # frontier while the current prefill cohort is running: admission
+            # will stop at the rejected head and otherwise starve the cohort.
+            if (
+                available_slots
+                and barrier_has_running_prefill
+                and not self._prefill_barrier_admission_blocked
+            ):
                 waiting_candidates = (
                     request
                     for request in self.waiting
                     if request.num_computed_tokens < request.num_prompt_tokens
-                    and request.request_id
-                    not in self._prefill_barrier_admission_blocked
                 )
                 prefill_candidates.extend(
                     itertools.islice(waiting_candidates, available_slots)
@@ -1024,6 +1030,16 @@ class Scheduler(SchedulerInterface):
                             self._pause_state,
                         )
                         self._gp12_wait_entry_logged.add(diag_head.request_id)
+                # A prior allocator rejection is retried after the active
+                # prefill cohort drains. This avoids repeating an unchanged
+                # rejection and keeps a newly feasible waiter from joining a
+                # frontier that was calculated without it.
+                if (
+                    self.prefill_batch_barrier
+                    and barrier_has_running_prefill
+                    and self._prefill_barrier_admission_blocked
+                ):
+                    break
                 if input_budget <= draft_slots:
                     break
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
