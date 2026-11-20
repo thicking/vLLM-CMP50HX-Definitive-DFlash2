@@ -24,6 +24,26 @@
 | `vllm/model_executor/models/qwen3_dflash.py`, `vllm/model_executor/models/qwen3_dflash2.py`, `vllm/model_executor/models/dflash2_sm75.py` | Preserve GPTQ/Marlin projection compatibility, SM75 DFlash2 kernels and the recovered Turing-specific MLP path. | At least part of this work is present in Nov 10 backups and predates GP-12. No performance attribution is made here. |
 | `vllm/model_executor/models/qwen3_5.py`, `vllm/model_executor/models/qwen3_5_mtp.py` | Preserve recovered Qwen 3.5/MTP source changes. | Present before this import; exact author, date and relationship to the reboot-time trees are UNKNOWN. |
 
+## GP-21.1 candidate changes (2026-11-20)
+
+- `vllm/v1/core/sched/scheduler.py`: when an allocator-rejected FIFO waiter
+  blocks admission, keep the active prefill cohort out of a frontier built
+  from later waiters and stop retrying the known rejection in that scheduler
+  step. FIFO admission and the existing prefill barrier remain enabled; the
+  rejected head is retried when the active prefill cohort drains; cancellation
+  removes its blocked-frontier state.
+- `vllm/v1/core/gp12_diagnostics.py`, `scheduler.py`, and
+  `kv_cache_manager.py`: bound GP-12 diagnostic state to at most 4096
+  request/event keys per component, log the first rejection and state changes, summarize
+  identical retries at exponentially increasing intervals, and clear state
+  on admission, completion, cancellation, or KV release. This changes logging
+  only, not allocator or scheduler decisions.
+- `tests/v1/core/test_scheduler.py` and `test_prefix_caching.py` cover the
+  no-progress reproduction, FIFO progress to completion, blocked-head
+  cancellation, and independent per-group allocation vectors. The
+  downstream-only `test_gp12_diagnostics.py` checks bounded state and log
+  summaries. CPU checks do not establish GPU stability.
+
 ## Regression tests
 
 New tests imported from the recovered working tree:

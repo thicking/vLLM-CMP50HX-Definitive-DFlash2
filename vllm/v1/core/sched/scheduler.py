@@ -36,6 +36,7 @@ from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
 )
+from vllm.v1.core.gp12_diagnostics import GP12DiagnosticLimiter
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
@@ -124,10 +125,8 @@ class Scheduler(SchedulerInterface):
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
-        self._gp12_capacity_diag_logged: set[str] = set()
+        self._gp12_diagnostics = GP12DiagnosticLimiter()
         self._gp12_two_req_batch_logged = False
-        self._gp12_wait_entry_logged: set[str] = set()
-        self._gp12_wait_post_logged: set[str] = set()
         logger.warning(
             "GP12_CAPACITY_INIT max_num_running_reqs=%d scheduler_max_num_seqs=%d",
             self.max_num_running_reqs,
@@ -1009,7 +1008,9 @@ class Scheduler(SchedulerInterface):
                     diag_head = diag_queue.peek_request() if diag_queue is not None else None
                     if (
                         diag_head is not None
-                        and diag_head.request_id not in self._gp12_wait_entry_logged
+                        and self._gp12_diagnostics.should_log_once(
+                            "WAIT_ENTRY", diag_head.request_id
+                        )
                     ):
                         logger.warning(
                             "GP12_WAIT_ENTRY id=%s step=%d running_ids=%s max_running=%d "
@@ -1029,7 +1030,6 @@ class Scheduler(SchedulerInterface):
                             prefill_frontier_step,
                             self._pause_state,
                         )
-                        self._gp12_wait_entry_logged.add(diag_head.request_id)
                 # A prior allocator rejection is retried after the active
                 # prefill cohort drains. This avoids repeating an unchanged
                 # rejection and keeps a newly feasible waiter from joining a
@@ -1050,7 +1050,9 @@ class Scheduler(SchedulerInterface):
                     head = queue.peek_request() if queue is not None else None
                     if (
                         head is not None
-                        and head.request_id not in self._gp12_capacity_diag_logged
+                        and self._gp12_diagnostics.should_log_once(
+                            "CAPACITY_BLOCK", head.request_id
+                        )
                     ):
                         logger.warning(
                             "GP12_CAPACITY_BLOCK request_id=%s max_num_running_reqs=%d "
@@ -1066,7 +1068,6 @@ class Scheduler(SchedulerInterface):
                             len(self.waiting),
                             len(self.skipped_waiting),
                         )
-                        self._gp12_capacity_diag_logged.add(head.request_id)
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
@@ -1311,7 +1312,15 @@ class Scheduler(SchedulerInterface):
                             num_external_computed_tokens,
                         )
                         if num_new_tokens == 0:
-                            logger.warning(
+                            self._log_gp12_wait_reject(
+                                request_id,
+                                "mamba_alignment",
+                                (
+                                    request.num_tokens - num_computed_tokens,
+                                    num_computed_tokens,
+                                    request.num_prompt_tokens,
+                                    self.cache_config.block_size,
+                                ),
                                 "GP12_WAIT_REJECT cause=mamba_alignment id=%s requested=%d "
                                 "computed=%d prompt=%d block_size=%d",
                                 request_id,
@@ -1402,7 +1411,21 @@ class Scheduler(SchedulerInterface):
                 )
 
                 if new_blocks is None:
-                    logger.warning(
+                    self._log_gp12_wait_reject(
+                        request_id,
+                        "allocate_slots",
+                        (
+                            request.num_prompt_tokens,
+                            request.num_tokens,
+                            num_computed_tokens,
+                            num_new_local_computed_tokens,
+                            num_new_tokens,
+                            effective_lookahead_tokens,
+                            self.scheduler_reserve_full_isl,
+                            bool(self.running),
+                            len(self.running),
+                            self.max_num_running_reqs,
+                        ),
                         "GP12_WAIT_REJECT cause=allocate_slots id=%s prompt=%d total=%d "
                         "computed=%d newly_computed=%d new_tokens=%d lookahead=%d "
                         "full_sequence_must_fit=%s has_running=%s running=%d max_running=%d",
@@ -1460,6 +1483,7 @@ class Scheduler(SchedulerInterface):
                     )
 
                 request = request_queue.pop_request()
+                self._clear_gp12_diagnostics(request_id)
                 self._prefill_barrier_admission_blocked.discard(request_id)
                 if load_kv_async:
                     # If loading async, allocate memory and put request
@@ -1571,7 +1595,9 @@ class Scheduler(SchedulerInterface):
             diag_head = diag_queue.peek_request() if diag_queue is not None else None
             if (
                 diag_head is not None
-                and diag_head.request_id not in self._gp12_wait_post_logged
+                and self._gp12_diagnostics.should_log_once(
+                    "WAIT_POST", diag_head.request_id
+                )
             ):
                 logger.warning(
                     "GP12_WAIT_POST id=%s step=%d running_ids=%s scheduled=%s "
@@ -1594,7 +1620,6 @@ class Scheduler(SchedulerInterface):
                     len(preempted_reqs),
                     self._pause_state,
                 )
-                self._gp12_wait_post_logged.add(diag_head.request_id)
 
         if len(num_scheduled_tokens) >= 2 and not self._gp12_two_req_batch_logged:
             logger.warning(
@@ -2851,6 +2876,53 @@ class Scheduler(SchedulerInterface):
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
+    def _log_gp12_wait_reject(
+        self,
+        request_id: str,
+        cause: str,
+        signature: tuple,
+        first_message: str,
+        *first_args,
+    ) -> None:
+        event = self._gp12_diagnostics.observe("WAIT_REJECT", request_id, signature)
+        if event is None:
+            return
+        if event.kind == "first":
+            logger.warning(first_message, *first_args)
+        elif event.kind == "state_change":
+            logger.warning(
+                "GP12_WAIT_REJECT_STATE_CHANGE id=%s cause=%s previous=%s current=%s "
+                "previous_attempts=%d previous_repeats=%d suppressed_repeats=%d",
+                request_id,
+                cause,
+                event.previous_signature,
+                event.signature,
+                event.previous_attempts,
+                event.previous_attempts - 1,
+                event.suppressed_repeats,
+            )
+        else:
+            logger.warning(
+                "GP12_WAIT_REJECT_REPEAT id=%s cause=%s attempts=%d repeats=%d "
+                "suppressed_since_last=%d",
+                request_id,
+                cause,
+                event.attempts,
+                event.attempts - 1,
+                event.suppressed_repeats,
+            )
+
+    def _clear_gp12_diagnostics(self, request_id: str) -> None:
+        for event_name, event in self._gp12_diagnostics.clear_request(request_id):
+            logger.warning(
+                "GP12_DIAGNOSTIC_RECOVERED id=%s event=%s attempts=%d "
+                "suppressed_repeats=%d",
+                request_id,
+                event_name,
+                event.attempts,
+                event.suppressed_repeats,
+            )
+
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
     ) -> list[Request]:
@@ -2933,6 +3005,7 @@ class Scheduler(SchedulerInterface):
 
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
+        self._clear_gp12_diagnostics(request_id)
         self._prefill_barrier_admission_blocked.discard(request_id)
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:

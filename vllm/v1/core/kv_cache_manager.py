@@ -10,6 +10,7 @@ from typing import Literal, overload
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.gp12_diagnostics import GP12DiagnosticLimiter
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
     get_kv_cache_coordinator,
@@ -136,6 +137,7 @@ class KVCacheManager:
         watermark: float = 0.0,
         enable_mamba_fine_grained_prefix_cache: bool = False,
     ) -> None:
+        self._gp12_diagnostics = GP12DiagnosticLimiter()
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
         # collapses to the prior (uncapped) admission behavior. The scheduler
@@ -527,13 +529,9 @@ class KVCacheManager:
                     capacity_by_group = [
                         pool.num_gpu_blocks for pool in self.coordinator.block_pools
                     ]
-                    logger.warning(
-                        "GP12_ALLOCATOR_REJECT stage=full_sequence request=%s "
-                        "prompt=%d request_tokens=%d required=%s free=%s capacity=%s "
-                        "watermark=%d reserved=%d",
-                        request.request_id,
-                        request.num_prompt_tokens,
-                        request.num_tokens,
+                    self._log_gp12_allocator_reject(
+                        "full_sequence",
+                        request,
                         required_by_group,
                         free_by_group,
                         capacity_by_group,
@@ -600,13 +598,9 @@ class KVCacheManager:
                 capacity_by_group = [
                     pool.num_gpu_blocks for pool in self.coordinator.block_pools
                 ]
-                logger.warning(
-                    "GP12_ALLOCATOR_REJECT stage=next_step request=%s "
-                    "prompt=%d request_tokens=%d required=%s free=%s capacity=%s "
-                    "watermark=%d reserved=%d",
-                    request.request_id,
-                    request.num_prompt_tokens,
-                    request.num_tokens,
+                self._log_gp12_allocator_reject(
+                    "next_step",
+                    request,
                     required_by_group,
                     free_by_group,
                     capacity_by_group,
@@ -644,6 +638,7 @@ class KVCacheManager:
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
         if delay_cache_blocks:
+            self._clear_gp12_diagnostics(request.request_id)
             return self.create_kv_cache_blocks(new_blocks)
 
         # NOTE(woosuk): We want to commit (cache) up to num_local_computed_tokens
@@ -657,7 +652,79 @@ class KVCacheManager:
         )
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
+        self._clear_gp12_diagnostics(request.request_id)
         return self.create_kv_cache_blocks(new_blocks)
+
+    def _log_gp12_allocator_reject(
+        self,
+        stage: str,
+        request: Request,
+        required: list[int],
+        free: list[int],
+        capacity: list[int],
+        watermark: int,
+        reserved: int,
+    ) -> None:
+        request_id = request.request_id
+        signature = (
+            stage,
+            tuple(required),
+            tuple(free),
+            tuple(capacity),
+            watermark,
+            reserved,
+        )
+        event = self._gp12_diagnostics.observe(
+            "ALLOCATOR_REJECT", request_id, signature
+        )
+        if event is None:
+            return
+        if event.kind == "first":
+            logger.warning(
+                "GP12_ALLOCATOR_REJECT stage=%s request=%s prompt=%d request_tokens=%d "
+                "required=%s free=%s capacity=%s watermark=%d reserved=%d",
+                stage,
+                request_id,
+                request.num_prompt_tokens,
+                request.num_tokens,
+                required,
+                free,
+                capacity,
+                watermark,
+                reserved,
+            )
+        elif event.kind == "state_change":
+            logger.warning(
+                "GP12_ALLOCATOR_REJECT_STATE_CHANGE request=%s previous=%s current=%s "
+                "previous_attempts=%d previous_repeats=%d suppressed_repeats=%d",
+                request_id,
+                event.previous_signature,
+                event.signature,
+                event.previous_attempts,
+                event.previous_attempts - 1,
+                event.suppressed_repeats,
+            )
+        else:
+            logger.warning(
+                "GP12_ALLOCATOR_REJECT_REPEAT request=%s stage=%s attempts=%d "
+                "repeats=%d suppressed_since_last=%d",
+                request_id,
+                stage,
+                event.attempts,
+                event.attempts - 1,
+                event.suppressed_repeats,
+            )
+
+    def _clear_gp12_diagnostics(self, request_id: str) -> None:
+        for event_name, event in self._gp12_diagnostics.clear_request(request_id):
+            logger.warning(
+                "GP12_DIAGNOSTIC_RECOVERED id=%s event=%s attempts=%d "
+                "suppressed_repeats=%d",
+                request_id,
+                event_name,
+                event.attempts,
+                event.suppressed_repeats,
+            )
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
@@ -667,6 +734,7 @@ class KVCacheManager:
         Args:
             request: The request to free the blocks.
         """
+        self._clear_gp12_diagnostics(request.request_id)
         self.coordinator.free(request.request_id)
 
     def remove_skipped_blocks(
