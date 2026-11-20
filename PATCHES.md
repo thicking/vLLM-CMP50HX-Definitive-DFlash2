@@ -59,6 +59,66 @@ portion. Its CPU regressions cover chunked prefill without output tokens,
 mixed prefill/decode, prefix and external KV, preemption/resume, cancellation,
 and Prometheus publication without iteration output.
 
+## GP-21.3: workload-aware DFlash draft pools (2026-11-20)
+
+- Adds opt-in `dflash_draft_pool_concurrency` /
+  `--dflash-draft-pool-concurrency`; unset preserves proportional sizing.
+  The active B profile opts in with `DFLASH_DRAFT_POOL_CONCURRENCY=2`.
+- Marks native draft groups from their actual cache specs and sizes each
+  independent DFlash pool from its `SlidingWindowSpec`, context, in-flight
+  demand, and shared physical byte budget. Existing target Mamba reservations
+  remain intact. Unsupported allocator overrides fail closed. Scheduler,
+  admission, prefill barrier, DFlash algorithm, and cache grouping are unchanged.
+- First production startup exposed a guard-placement bug: CUDA Graph profiling
+  temporarily sets `num_gpu_blocks_override` for a minimum cache. The generic
+  low-level builder mistook this internal profiling override for a user
+  override. The guard was moved to the real `get_kv_cache_configs()` sizing
+  path, preserving rejection of an explicit user override. Targeted tests
+  passed, and the corrected candidate then started successfully on production.
+- Production allocator log (per TP rank): cache capacity `247,398` tokens;
+  concurrency `1.12x` for `max_model_len=221184`; total backing `5.82 GiB/rank`.
+  Actual groups were:
+
+  | Groups | Role/spec | Capacity / usable / minimum blocks | Page bytes | Backing bytes per group |
+  |---|---|---:|---:|---:|
+  | 0–2 | target `MambaSpec` | 23 / 22 / 20 | 27,000,832 | 621,019,136 |
+  | 3 | target `FullAttentionSpec` | 151 / 150 / 135 | 27,000,832 | 4,077,125,632 |
+  | 4–8 | draft `SlidingWindowSpec` | 18 / 17 / 16 | 3,375,104 | 60,751,872 |
+
+  `usable_blocks` excludes the null page. Target attention lost three blocks
+  versus the original vector `[23,23,23,154,10,10,10,10,10]`; each of five
+  draft pools gained eight. The maximum context remains configured at 221184.
+  This is not a guarantee that two full-context sequences fit simultaneously.
+- GPU acceptance on two CMP50HX GPUs: simultaneous pairs completed at ~21K,
+  32K, 64K, and 96K prompt sizes; an asymmetric `199990 + 16000` pair also
+  reached `running=2` and `prefilling=2` without allocator rejection. The
+  asymmetric pair retained context 221184 and completed both short outputs.
+  The ~21K pair produced 1,353 / 1,494 output tokens with TTFT 45.597 / 46.843
+  s and TG 58.34 / 59.47 tok/s. Longer-prompt admission probes used two output
+  tokens each; they validate admission/prefill, not useful decode throughput.
+- Prefix reuse was confirmed with an 8K identical repeat: `cached_tokens=4944`
+  (three 1648-token cache blocks); computed-prefill delta matched the uncached
+  prompt remainder. A waiting cancellation probe cleared the waiting slot
+  within about 1.54 s while both active requests continued; the client harness
+  reported a socket-close `AttributeError`, so client-side cancellation
+  completion is not claimed from that probe. Earlier CPU lifecycle tests cover
+  allocator release, cancellation and prefix-cache preemption.
+- Post-restart smoke: `/health=200`, model `swift15-qwen38-awq`, context
+  `221184`, service active, `NRestarts=0`, and queue gauges returned to zero.
+  A post-restart smoke request returned HTTP 200 with a short prompt and
+  response; DFlash counters advanced. Startup arguments confirmed TP2,
+  DFlash K=7, draft FP16 KV, target FP8 KV, prefix caching, CUDA Graphs,
+  `qwen3_xml`, and Custom AllReduce OFF. No matching CUDA/NCCL/Xid/AER/OOM
+  errors appeared in the inspected runtime and kernel logs after restart.
+- Targeted CPU test for the per-group diagnostic log:
+  `1 passed, 119 deselected, 15 warnings in 8.81s`. Earlier candidate CPU
+  lifecycle/sizing subset: `5 passed, 14 warnings in 13.78s`. Profile and
+  launcher checks were green before deployment. No full upstream suite or
+  CUDA/native extension rebuild was run.
+- Rollback artifacts and numeric-only acceptance telemetry remain on the
+  private test host and are excluded from this source release. No prompts or
+  generated content are part of the published tree.
+
 ## Regression tests
 
 New tests imported from the recovered working tree:
