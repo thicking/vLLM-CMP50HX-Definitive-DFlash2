@@ -53,11 +53,13 @@ def test_dflash_target_mamba_reserves_speculative_pages():
     dflash_config = SimpleNamespace(
         cache_config=cache_config,
         speculative_config=SimpleNamespace(method="dflash"),
+        scheduler_config=SimpleNamespace(max_num_seqs=1),
         num_speculative_tokens=7,
     )
     mtp_config = SimpleNamespace(
         cache_config=cache_config,
         speculative_config=SimpleNamespace(method="mtp"),
+        scheduler_config=SimpleNamespace(max_num_seqs=1),
         num_speculative_tokens=3,
     )
 

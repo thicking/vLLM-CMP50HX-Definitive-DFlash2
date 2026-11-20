@@ -53,6 +53,18 @@ def test_prefix_caching_from_cli():
     assert vllm_config.cache_config.prefix_cache_retention_interval == 64
 
 
+def test_dflash_draft_pool_concurrency_from_cli():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    args = parser.parse_args([])
+    config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert config.cache_config.dflash_draft_pool_concurrency is None
+
+    args = parser.parse_args(["--dflash-draft-pool-concurrency", "2"])
+    config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert config.cache_config.dflash_draft_pool_concurrency == 2
+
+
 @pytest.mark.skipif(_xxhash is None, reason="xxhash not installed")
 def test_prefix_caching_xxhash_from_cli():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())

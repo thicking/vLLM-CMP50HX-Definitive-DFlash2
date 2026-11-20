@@ -23,6 +23,10 @@ init_config_registry
   echo "MM_LIMIT_JSON missing from config registry" >&2
   exit 1
 }
+[[ -n "${CONFIG_KNOWN_KEYS[DFLASH_DRAFT_POOL_CONCURRENCY]+x}" ]] || {
+  echo "DFLASH_DRAFT_POOL_CONCURRENCY missing from config registry" >&2
+  exit 1
+}
 
 reset_message_type_test_state() {
   unset MESSAGE_TYPE MM_LIMIT_JSON MM_IMAGE_LIMIT LANGUAGE_MODEL_ONLY SKIP_MM_PROFILING
@@ -142,6 +146,7 @@ fi
 
 reset_spec_test_state() {
   unset SPECULATIVE_METHOD SPECULATIVE_TOKENS SPECULATIVE_MODEL MTP_K
+  unset DFLASH_DRAFT_POOL_CONCURRENCY
   unset VLLM_KV_CACHE_LAYOUT SPECULATIVE_ATTENTION_BACKEND
   unset SPECULATIVE_KV_CACHE_DTYPE PER_REQUEST_SPEC_DECODE_METRICS
   unset LONG_PREFILL_TOKEN_THRESHOLD
@@ -212,6 +217,24 @@ grep -Fxq -- '--per-request-spec-decode-metrics' <<<"$args"
 grep -Fxq -- 'detailed' <<<"$args"
 grep -Fxq -- '--generation-config' <<<"$args"
 grep -Fxq -- 'auto' <<<"$args"
+
+DFLASH_DRAFT_POOL_CONCURRENCY=2
+SPECULATIVE_METHOD=dflash
+SPECULATIVE_TOKENS=7
+MAX_NUM_SEQS=2
+validate_speculative_route
+VLLM_ARGS=()
+build_args 127.0.0.1
+args=$(printf '%s\n' "${VLLM_ARGS[@]}")
+grep -Fxq -- '--dflash-draft-pool-concurrency' <<<"$args"
+grep -Fxq -- '2' <<<"$args"
+MAX_NUM_SEQS=1
+if validate_speculative_route 2>/dev/null; then
+  echo "DFlash draft pool larger than MAX_NUM_SEQS unexpectedly accepted" >&2
+  exit 1
+fi
+MAX_NUM_SEQS=2
+unset DFLASH_DRAFT_POOL_CONCURRENCY
 
 GENERATION_CONFIG=vllm
 VLLM_ARGS=()

@@ -3147,6 +3147,12 @@ def test_dflash_aligned_hybrid_uses_native_draft_pages():
     assert all(
         isinstance(group.kv_cache_spec, SlidingWindowSpec) for group in draft_groups
     )
+    assert all(group.is_dflash_draft_group for group in draft_groups)
+    assert all(
+        group.is_dflash_draft_group
+        == bool(set(group.layer_names) & draft_layer_names)
+        for group in groups
+    )
     assert all(group.kv_cache_spec.block_size == 720 for group in draft_groups)
     assert all(group.kv_cache_spec.page_size_padded is None for group in draft_groups)
     assert all(
@@ -3193,6 +3199,284 @@ def test_dflash_aligned_hybrid_uses_native_draft_pages():
     target_capacity, _ = get_kv_cache_capacity(config, target_only_config)
     dflash_capacity, _ = get_kv_cache_capacity(config, dflash_config)
     assert dflash_capacity >= target_capacity * 0.70
+
+
+def test_dflash_workload_pool_sizing_preserves_budget_and_allocator_lifecycle():
+    """Size two draft sequences while retaining a full-context target request."""
+    block_size = 1648
+    context = 221184
+    config = _dflash_aligned_hybrid_grouping_config()
+    config.model_config.max_model_len = context
+    config.scheduler_config.max_num_seqs = 2
+    config.max_in_flight_tokens = 4096
+
+    full_spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=32,
+        head_size=256,
+        dtype=torch.uint8,
+    )
+    page_bytes = full_spec.page_size_bytes
+    mamba_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((page_bytes,),),
+        dtypes=(torch.uint8,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=7,
+    )
+    draft_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=4,
+        head_size=128,
+        dtype=torch.float16,
+        sliding_window=7441,
+    )
+    groups = [
+        KVCacheGroupSpec([f"target_mamba_{i}"], mamba_spec) for i in range(3)
+    ]
+    groups.append(KVCacheGroupSpec(["target_attention"], full_spec))
+    groups.extend(
+        KVCacheGroupSpec(
+            [f"draft_{i}"], draft_spec, is_dflash_draft_group=True
+        )
+        for i in range(5)
+    )
+
+    # Select a repeatable budget whose unchanged default plan has a fixed
+    # reference vector for these cache specs. This synthetic Mamba spec is
+    # intentionally distinct from the production profile's measured vector.
+    base_requirements = [
+        kv_cache_utils.cdiv(
+            group.kv_cache_spec.max_memory_usage_bytes(config),
+            group.kv_cache_spec.page_size_bytes,
+        )
+        for group in groups
+    ]
+    group_page_bytes = [kv_cache_utils._group_page_bytes(group) for group in groups]
+    required_bytes = sum(
+        required * page
+        for required, page in zip(base_requirements, group_page_bytes, strict=True)
+    )
+    available_memory = sum(group_page_bytes) + int(required_bytes * 1.137)
+
+    config.cache_config.dflash_draft_pool_concurrency = None
+    baseline = kv_cache_utils.get_kv_cache_config_from_groups(
+        config, groups, available_memory
+    )
+    assert baseline.num_blocks_per_group == (21, 21, 21, 154, 10, 10, 10, 10, 10)
+
+    config.cache_config.dflash_draft_pool_concurrency = 2
+    candidate = kv_cache_utils.get_kv_cache_config_from_groups(
+        config, groups, available_memory
+    )
+    capacities = candidate.num_blocks_per_group
+    assert candidate.independent_block_pools
+    assert capacities is not None and capacities[3] - 1 >= kv_cache_utils.cdiv(
+        context, block_size
+    )
+    assert all(capacity - 1 >= 16 for capacity in capacities[4:])
+    assert capacities[:3] == baseline.num_blocks_per_group[:3]
+
+    backing_bytes = sum(
+        capacity * page
+        for capacity, page in zip(capacities, group_page_bytes, strict=True)
+    )
+    assert backing_bytes <= available_memory
+    assert candidate.num_blocks == max(capacities)
+    assert all(tensor.size == backing_bytes for tensor in candidate.kv_cache_tensors)
+    expected_offset = 0
+    for tensor, group, capacity in zip(
+        candidate.kv_cache_tensors, groups, capacities, strict=True
+    ):
+        assert tensor.offset == expected_offset
+        expected_offset += kv_cache_utils._group_page_bytes(group) * capacity
+    assert expected_offset == backing_bytes
+
+    # CUDA Graph profiling temporarily sets a tiny block override and calls
+    # the low-level builder before the real workload-aware startup sizing.
+    # That internal override must remain valid for the profiling cache.
+    config.cache_config.num_gpu_blocks_override = 2
+    profiling_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        config, groups, available_memory=0
+    )
+    assert profiling_config.num_blocks_per_group == (2,) * len(groups)
+    config.cache_config.num_gpu_blocks_override = None
+
+    init_none_hash(sha256)
+    manager = KVCacheManager(
+        candidate,
+        max_model_len=context,
+        scheduler_block_size=block_size,
+        hash_block_size=block_size,
+        max_in_flight_tokens=4096,
+        enable_caching=True,
+    )
+
+    def make_request(request_id: str, offset: int, token_count: int) -> Request:
+        token_ids = [offset + i for i in range(token_count)]
+        return Request(
+            request_id=request_id,
+            prompt_token_ids=token_ids,
+            sampling_params=SamplingParams(max_tokens=64),
+            pooling_params=None,
+            lora_request=None,
+            cache_salt=None,
+            block_hasher=get_request_block_hasher(block_size, sha256),
+            session_id=None,
+        )
+
+    requests = [
+        make_request("pair-a", 1000, 21000),
+        make_request("pair-b", 50000, 21000),
+    ]
+    allocated_requests: list[Request] = []
+
+    def run_prefill_chunk(
+        request: Request, num_new_tokens: int, *, first_admission: bool = False
+    ) -> None:
+        computed = manager.get_computed_blocks(request)[0] if first_admission else None
+        assert manager.allocate_slots(
+            request,
+            num_new_tokens=num_new_tokens,
+            new_computed_blocks=computed,
+            num_lookahead_tokens=7,
+            full_sequence_must_fit=first_admission,
+        ) is not None
+        if all(
+            allocated.request_id != request.request_id
+            for allocated in allocated_requests
+        ):
+            allocated_requests.append(request)
+        request.num_computed_tokens += num_new_tokens
+        manager.cache_blocks(request, request.num_computed_tokens)
+
+    try:
+        for request in requests:
+            run_prefill_chunk(request, 2 * block_size, first_admission=True)
+
+        # Model the production chunked-prefill limit instead of asking the KV
+        # manager to allocate an entire 21K prompt in one scheduler step.
+        while any(
+            request.num_computed_tokens < request.num_tokens
+            for request in requests
+        ):
+            for request in requests:
+                remaining = request.num_tokens - request.num_computed_tokens
+                if remaining > 0:
+                    run_prefill_chunk(request, min(2 * block_size, remaining))
+
+        assert len(manager.get_block_ids(requests[0].request_id)) == len(groups)
+        assert len(manager.get_block_ids(requests[1].request_id)) == len(groups)
+
+        # Decode-side growth must remain allocatable after both prompt admissions.
+        for step in range(32):
+            request = requests[step % 2]
+            assert manager.allocate_slots(
+                request, num_new_tokens=1, num_lookahead_tokens=7
+            ) is not None
+            request.num_computed_tokens += 1
+            request.append_output_token_ids(900000 + step)
+
+        for request in allocated_requests:
+            manager.free(request)
+        allocated_requests.clear()
+        repeat = make_request("pair-a-repeat", 1000, 21000)
+        _, hit_tokens, _ = manager.get_computed_blocks(repeat)
+        assert hit_tokens > 0
+
+        max_request = make_request("single-max", 1000000, context)
+        computed, _, _ = manager.get_computed_blocks(max_request)
+        assert manager.allocate_slots(
+            max_request,
+            num_new_tokens=block_size,
+            new_computed_blocks=computed,
+            num_lookahead_tokens=7,
+            full_sequence_must_fit=True,
+        ) is not None
+        allocated_requests.append(max_request)
+        manager.free(max_request)
+        allocated_requests.clear()
+    finally:
+        for request in allocated_requests:
+            manager.free(request)
+
+
+def test_dflash_workload_pool_sizing_fails_closed_on_unsupported_config():
+    config = _dflash_aligned_hybrid_grouping_config()
+    config.cache_config.dflash_draft_pool_concurrency = 2
+    draft_group = KVCacheGroupSpec(
+        ["draft"],
+        SlidingWindowSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=64,
+            dtype=torch.float16,
+            sliding_window=2048,
+        ),
+        is_dflash_draft_group=True,
+    )
+
+    config.speculative_config.use_dflash = lambda: False
+    with pytest.raises(ValueError, match="requires native DFlash2"):
+        kv_cache_utils._validate_dflash_draft_pool_concurrency(config, [draft_group])
+
+    config.speculative_config.use_dflash = lambda: True
+    config.scheduler_config.max_num_seqs = 1
+    with pytest.raises(ValueError, match="must be <= scheduler max_num_seqs"):
+        kv_cache_utils._validate_dflash_draft_pool_concurrency(config, [draft_group])
+
+    config.scheduler_config.max_num_seqs = 2
+    config.cache_config.num_gpu_blocks_override = 64
+    # The generic validator is also used by temporary CUDA Graph profiling.
+    # The override incompatibility is checked only by the real allocator path.
+    assert kv_cache_utils._validate_dflash_draft_pool_concurrency(
+        config, [draft_group]
+    ) == 2
+    with pytest.raises(ValueError, match="num_gpu_blocks_override"):
+        kv_cache_utils._validate_dflash_draft_pool_allocator_config(
+            config, [draft_group]
+        )
+
+    config.cache_config.num_gpu_blocks_override = None
+    mamba_group = KVCacheGroupSpec(
+        ["target_mamba"],
+        MambaSpec(
+            block_size=16,
+            shapes=((1024,),),
+            dtypes=(torch.uint8,),
+            mamba_cache_mode="align",
+            num_speculative_blocks=7,
+        ),
+    )
+    with pytest.raises(ValueError, match="cannot preserve the existing target Mamba"):
+        kv_cache_utils._dflash_group_capacities(
+            config, [mamba_group, draft_group], available_memory=0
+        )
+
+
+def test_dflash_workload_sizing_rejects_explicit_allocator_override(monkeypatch):
+    config = _dflash_aligned_hybrid_grouping_config()
+    config.scheduler_config.max_num_seqs = 2
+    config.speculative_config.use_multi_module_mtp = lambda: False
+    config.speculative_config.num_speculative_tokens = 7
+    config.cache_config.dflash_draft_pool_concurrency = 2
+    config.cache_config.num_gpu_blocks_override = 64
+    draft_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float16,
+        sliding_window=2048,
+    )
+    groups = [
+        KVCacheGroupSpec(["draft"], draft_spec, is_dflash_draft_group=True)
+    ]
+    monkeypatch.setattr(kv_cache_utils, "get_kv_cache_groups", lambda *_: groups)
+
+    with pytest.raises(ValueError, match="num_gpu_blocks_override"):
+        kv_cache_utils.get_kv_cache_configs(
+            config, [{"draft": draft_spec}], available_memory=[0]
+        )
 
 
 def test_dflash_aligned_hybrid_identifies_local_draft_layer_names():

@@ -52,6 +52,27 @@ for mode in fast normal; do
   expect_valid "$case_dir"
 done
 
+case_dir="$TEST_ROOT/dflash-pool-valid"
+mkdir -p "$case_dir"
+printf '%s\n' \
+  'MODEL_FAMILY=qwen27b' \
+  'MODEL_VARIANT=w4a16' \
+  'QUANTIZATION=compressed-tensors' \
+  'KV_CACHE_DTYPE=fp8' \
+  'MAX_MODEL_LEN=221184' \
+  'GPU_UTIL=0.986' \
+  'MAX_NUM_SEQS=2' \
+  'DFLASH_DRAFT_POOL_CONCURRENCY=2' \
+  'MESSAGE_TYPE=text+image' \
+  'SPECULATIVE_METHOD=dflash' \
+  'SPECULATIVE_TOKENS=7' > "$case_dir/dflash2-fp8kv-2x221K-text-image.env"
+expect_valid "$case_dir"
+
+case_dir="$TEST_ROOT/dflash-pool-too-large"
+profile=$(write_valid_profile "$case_dir")
+printf 'DFLASH_DRAFT_POOL_CONCURRENCY=2\n' >> "$profile"
+expect_invalid "$case_dir" 'DFLASH_DRAFT_POOL_CONCURRENCY requires SPECULATIVE_METHOD=dflash'
+
 for mode in safe aggressive invalid; do
   case_dir="$TEST_ROOT/bad-mode-$mode"
   profile=$(write_valid_profile "$case_dir")
