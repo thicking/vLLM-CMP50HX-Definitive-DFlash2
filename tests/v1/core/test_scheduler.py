@@ -502,6 +502,54 @@ def test_prefill_barrier_does_not_promote_waiters_past_blocked_fifo_head():
     assert later.status == RequestStatus.FINISHED_LENGTH_CAPPED
 
 
+def test_prefill_barrier_cancelled_blocked_head_does_not_linger_in_state():
+    scheduler = create_scheduler(
+        max_num_seqs=2,
+        max_num_batched_tokens=512,
+        max_model_len=1024,
+        num_blocks=96,
+        block_size=16,
+        enable_chunked_prefill=True,
+        long_prefill_token_threshold=512,
+        prefill_batch_barrier=True,
+    )
+    running, blocked, later = create_requests(
+        num_requests=3,
+        num_tokens=1024,
+        max_tokens=1,
+        req_ids=["running", "blocked", "later"],
+    )
+    scheduler.add_request(running)
+    first = scheduler.schedule()
+    scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(
+            req_ids=["running"],
+            req_id_to_index={"running": 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    scheduler.add_request(blocked)
+    scheduler.add_request(later)
+
+    assert scheduler.schedule().num_scheduled_tokens == {}
+    assert "blocked" in scheduler._prefill_barrier_admission_blocked
+    scheduler.finish_requests("blocked", RequestStatus.FINISHED_ABORTED)
+    assert "blocked" not in scheduler._prefill_barrier_admission_blocked
+
+    # The newly exposed FIFO head may fail admission once, but that failure
+    # must not prevent the already-running request from advancing next.
+    assert scheduler.schedule().num_scheduled_tokens == {}
+    assert "later" in scheduler._prefill_barrier_admission_blocked
+    resumed = scheduler.schedule()
+    assert resumed.num_scheduled_tokens == {"running": 511}
+    scheduler.finish_requests("running", RequestStatus.FINISHED_ABORTED)
+    assert "running" not in scheduler._prefill_barrier_admission_blocked
+
+
 def test_prefill_batch_barrier_does_not_pause_decode_for_late_request():
     """A late prefill joins an active decode step instead of forcing a gap."""
     scheduler = create_scheduler(

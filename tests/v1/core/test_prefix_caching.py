@@ -5098,6 +5098,119 @@ def test_can_fit_full_sequence_full_attention_still_gates_oversized():
     assert manager.allocate_slots(req, block_size, full_sequence_must_fit=True) is None
 
 
+def test_production_dflash_group_vector_requires_every_pool_to_fit():
+    """One-page deficits in any independent pool must reject admission."""
+    capacities = (23, 23, 23, 154, 10, 10, 10, 10, 10)
+    free_snapshot = (14, 14, 14, 151, 7, 7, 7, 7, 7)
+    required = (8, 8, 8, 13, 8, 8, 8, 8, 8)
+    block_size = 16
+    config = KVCacheConfig(
+        num_blocks=sum(capacities),
+        num_blocks_per_group=capacities,
+        independent_block_pools=True,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                [f"layer_{i}"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            )
+            for i in range(len(capacities))
+        ],
+    )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=221184,
+        enable_caching=False,
+        hash_block_size=block_size,
+    )
+    pools = manager.coordinator.block_pools
+    held_blocks = [[] for _ in pools]
+    try:
+        for index, (pool, target_free, capacity) in enumerate(
+            zip(pools, free_snapshot, capacities, strict=True)
+        ):
+            assert pool.num_gpu_blocks == capacity
+            to_hold = pool.get_num_free_blocks() - target_free
+            assert to_hold >= 0
+            held_blocks[index].extend(pool.get_new_blocks(to_hold))
+
+        assert tuple(pool.get_num_free_blocks() for pool in pools) == free_snapshot
+        before_probe = tuple(pool.get_num_free_blocks() for pool in pools)
+        assert not manager.coordinator.can_allocate(required)
+        assert tuple(pool.get_num_free_blocks() for pool in pools) == before_probe
+
+        for index in range(4, 9):
+            released = held_blocks[index].pop()
+            pools[index].free_blocks([released])
+        assert tuple(pool.get_num_free_blocks() for pool in pools) == (
+            14, 14, 14, 151, 8, 8, 8, 8, 8
+        )
+        assert manager.coordinator.can_allocate(required)
+    finally:
+        for pool, blocks in zip(pools, held_blocks, strict=True):
+            if blocks:
+                pool.free_blocks(blocks)
+
+
+def test_repeated_allocator_reject_logs_are_rate_limited(
+    caplog: pytest.LogCaptureFixture,
+):
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="vllm.v1.core.kv_cache_manager")
+    block_size = 16
+    capacities = (8, 8)
+    config = KVCacheConfig(
+        num_blocks=sum(capacities),
+        num_blocks_per_group=capacities,
+        independent_block_pools=True,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                [f"layer_{i}"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            )
+            for i in range(len(capacities))
+        ],
+    )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=1024,
+        enable_caching=False,
+        hash_block_size=block_size,
+    )
+    request = make_request("allocator-blocked", list(range(256)), block_size, sha256)
+
+    for _ in range(64):
+        assert (
+            manager.allocate_slots(
+                request,
+                num_new_tokens=block_size,
+                full_sequence_must_fit=True,
+            )
+            is None
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    rejects = [
+        message
+        for message in messages
+        if message.startswith("GP12_ALLOCATOR_REJECT")
+    ]
+    assert len(rejects) <= 7
+    assert any(message.startswith("GP12_ALLOCATOR_REJECT ") for message in rejects)
+
+
 def test_can_fit_full_sequence_hisparse_caps_resident_pages():
     manager = make_hisparse_kv_cache_manager(
         num_blocks=11,
