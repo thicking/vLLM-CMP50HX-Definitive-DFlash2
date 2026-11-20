@@ -3201,8 +3201,14 @@ def test_dflash_aligned_hybrid_uses_native_draft_pages():
     assert dflash_capacity >= target_capacity * 0.70
 
 
-def test_dflash_workload_pool_sizing_preserves_budget_and_allocator_lifecycle():
+def test_dflash_workload_pool_sizing_preserves_budget_and_allocator_lifecycle(monkeypatch):
     """Size two draft sequences while retaining a full-context target request."""
+    log_messages = []
+    monkeypatch.setattr(
+        kv_cache_utils.logger,
+        "info",
+        lambda message, *args: log_messages.append(message % args if args else message),
+    )
     block_size = 1648
     context = 221184
     config = _dflash_aligned_hybrid_grouping_config()
@@ -3284,6 +3290,17 @@ def test_dflash_workload_pool_sizing_preserves_budget_and_allocator_lifecycle():
     assert backing_bytes <= available_memory
     assert candidate.num_blocks == max(capacities)
     assert all(tensor.size == backing_bytes for tensor in candidate.kv_cache_tensors)
+    log_text = "\n".join(log_messages)
+    assert "DFlash KV pool allocation by group" in log_text
+    for group_id, (capacity, group_page_bytes) in enumerate(
+        zip(capacities, group_page_bytes, strict=True)
+    ):
+        assert f"group={group_id} " in log_text
+        assert f"capacity_blocks={capacity} usable_blocks={capacity - 1}" in log_text
+        assert (
+            f"page_bytes={group_page_bytes} backing_bytes="
+            f"{capacity * group_page_bytes}"
+        ) in log_text
     expected_offset = 0
     for tensor, group, capacity in zip(
         candidate.kv_cache_tensors, groups, capacities, strict=True

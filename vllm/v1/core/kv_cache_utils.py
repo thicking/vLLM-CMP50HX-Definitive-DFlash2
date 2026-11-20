@@ -1258,6 +1258,22 @@ def _dflash_group_capacities(
         for i, group in enumerate(kv_cache_groups)
         if group.is_dflash_draft_group
     ]
+    group_backing = [
+        "group=%d role=%s spec=%s block_size=%s capacity_blocks=%d "
+        "usable_blocks=%d minimum_usable_blocks=%d page_bytes=%d backing_bytes=%d"
+        % (
+            i,
+            "draft" if group.is_dflash_draft_group else "target",
+            type(group.kv_cache_spec).__name__,
+            getattr(group.kv_cache_spec, "block_size", "n/a"),
+            result[i],
+            max(result[i] - 1, 0),
+            requirements[i],
+            page_bytes[i],
+            result[i] * page_bytes[i],
+        )
+        for i, group in enumerate(kv_cache_groups)
+    ]
     logger.info(
         "Workload-aware DFlash draft KV sizing: concurrency=%d, "
         "minimum usable blocks per draft pool=%s, group capacities=%s, "
@@ -1267,6 +1283,7 @@ def _dflash_group_capacities(
         result,
         format_gib(sum(cap * page for cap, page in zip(result, page_bytes))),
     )
+    logger.info("DFlash KV pool allocation by group: %s", " | ".join(group_backing))
     return result
 
 
