@@ -79,6 +79,14 @@ from vllm.v1.utils import record_function_or_nullcontext
 logger = init_logger(__name__)
 
 
+def _get_num_prefill_computed_tokens(
+    num_scheduled_tokens: int, num_computed_tokens: int, num_prompt_tokens: int
+) -> int:
+    """Count locally scheduled prompt positions, excluding cache and decode."""
+    remaining_prompt_tokens = max(0, num_prompt_tokens - num_computed_tokens)
+    return min(num_scheduled_tokens, remaining_prompt_tokens)
+
+
 class Scheduler(SchedulerInterface):
     def __init__(
         self,
@@ -1635,6 +1643,18 @@ class Scheduler(SchedulerInterface):
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
 
+        # Use the finalized batch, after preemption and admission decisions.
+        # The snapshot travels with SchedulerOutput and is published only
+        # after the model runner returns successfully.
+        num_prefill_computed_tokens = sum(
+            _get_num_prefill_computed_tokens(
+                scheduled_tokens,
+                self.requests[request_id].num_computed_tokens,
+                self.requests[request_id].num_prompt_tokens,
+            )
+            for request_id, scheduled_tokens in num_scheduled_tokens.items()
+        )
+
         assert token_budget >= 0
         assert input_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs
@@ -1761,6 +1781,7 @@ class Scheduler(SchedulerInterface):
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
+            num_prefill_computed_tokens=num_prefill_computed_tokens,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -2659,6 +2680,11 @@ class Scheduler(SchedulerInterface):
                 perf_stats,
             )
         ) is not None:
+            # The scheduler snapshot is emitted only after this execution
+            # step has returned a ModelRunnerOutput.
+            stats.prefill_computed_tokens = (
+                scheduler_output.num_prefill_computed_tokens
+            )
             # Return stats to only one of the front-ends.
             if (eco := next(iter(engine_core_outputs.values()), None)) is None:
                 # We must return the stats even if there are no request
@@ -3211,11 +3237,21 @@ class Scheduler(SchedulerInterface):
         connector_stats_payload = (
             kv_connector_stats.to_dict() if kv_connector_stats else None
         )
+        prefill_requests = [
+            request
+            for request in self.running
+            if request.num_computed_tokens < request.num_prompt_tokens
+        ]
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
             num_skipped_waiting_reqs=len(self.skipped_waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
+            num_requests_prefilling=len(prefill_requests),
+            prefill_tokens_remaining=sum(
+                request.num_prompt_tokens - request.num_computed_tokens
+                for request in prefill_requests
+            ),
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,

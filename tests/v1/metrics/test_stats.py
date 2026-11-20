@@ -4,8 +4,12 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from prometheus_client import generate_latest
+
+from vllm.config import ModelConfig, ObservabilityConfig, VllmConfig
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
+from vllm.v1.metrics.loggers import PrometheusStatLogger, unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
@@ -16,6 +20,32 @@ from vllm.v1.metrics.stats import (
 )
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.utils import compute_iteration_details
+
+
+def test_live_prefill_prometheus_updates_without_iteration_output():
+    config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m"),
+        observability_config=ObservabilityConfig(),
+    )
+    unregister_vllm_metrics()
+    try:
+        logger = PrometheusStatLogger(config)
+        logger.record(
+            scheduler_stats=SchedulerStats(
+                prefill_computed_tokens=37,
+                num_requests_prefilling=2,
+                prefill_tokens_remaining=91,
+            ),
+            iteration_stats=None,
+            engine_idx=0,
+        )
+        assert logger.counter_prefill_computed_tokens[0]._value.get() == 37
+        assert logger.counter_prompt_tokens[0]._value.get() == 0
+        assert logger.gauge_num_requests_prefilling[0]._value.get() == 2
+        assert logger.gauge_prefill_tokens_remaining[0]._value.get() == 91
+        assert b"vllm:prefill_computed_tokens_total{" in generate_latest()
+    finally:
+        unregister_vllm_metrics()
 
 
 def test_iteration_stats_repr():
@@ -37,6 +67,9 @@ def test_scheduler_iteration_details_serialization():
     outputs = EngineCoreOutputs(
         scheduler_stats=SchedulerStats(
             kv_cache_usage=0.5,
+            prefill_computed_tokens=17,
+            num_requests_prefilling=2,
+            prefill_tokens_remaining=31,
             iteration_details=iteration_details,
         )
     )
@@ -46,6 +79,9 @@ def test_scheduler_iteration_details_serialization():
 
     assert decoded.scheduler_stats is not None
     assert decoded.scheduler_stats.kv_cache_usage == 0.5
+    assert decoded.scheduler_stats.prefill_computed_tokens == 17
+    assert decoded.scheduler_stats.num_requests_prefilling == 2
+    assert decoded.scheduler_stats.prefill_tokens_remaining == 31
     assert decoded.scheduler_stats.iteration_details == iteration_details
 
 

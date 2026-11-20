@@ -304,6 +304,10 @@ class SchedulerOutput:
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
 
+    # Locally computed prompt tokens scheduled for this step. Published only
+    # after the corresponding model execution succeeds.
+    num_prefill_computed_tokens: int = 0
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

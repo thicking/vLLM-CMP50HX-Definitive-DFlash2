@@ -63,6 +63,116 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
+def test_live_prefill_metrics_track_chunked_steps_without_output_tokens():
+    scheduler = create_scheduler(max_num_batched_tokens=50, enable_chunked_prefill=True)
+    (request,) = create_requests(
+        num_requests=1, num_tokens=80, req_ids=["live-prefill"]
+    )
+    scheduler.add_request(request)
+
+    first = scheduler.schedule()
+    assert first.num_prefill_computed_tokens == 50
+    first_outputs = scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    first_stats = first_outputs[0].scheduler_stats
+    assert first_stats is not None
+    assert first_stats.prefill_computed_tokens == 50
+    assert first_stats.num_requests_prefilling == 1
+    assert first_stats.prefill_tokens_remaining == 30
+
+    second = scheduler.schedule()
+    assert second.num_prefill_computed_tokens == 30
+    second_outputs = scheduler.update_from_output(
+        second,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[100]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    second_stats = second_outputs[0].scheduler_stats
+    assert second_stats is not None
+    assert second_stats.prefill_computed_tokens == 30
+    assert second_stats.num_requests_prefilling == 0
+    assert second_stats.prefill_tokens_remaining == 0
+
+
+def test_live_prefill_metrics_exclude_decode_in_mixed_batch():
+    scheduler = create_scheduler(
+        max_num_seqs=2, max_num_batched_tokens=50, enable_chunked_prefill=True
+    )
+    (decode_req,) = create_requests(num_requests=1, num_tokens=4, req_ids=["decode"])
+    scheduler.add_request(decode_req)
+    initial = scheduler.schedule()
+    assert initial.num_prefill_computed_tokens == 4
+    _model_output(scheduler, initial, [[100]])
+    assert not decode_req.is_prefill_chunk
+
+    (prefill_req,) = create_requests(num_requests=1, num_tokens=80, req_ids=["prefill"])
+    scheduler.add_request(prefill_req)
+    mixed = scheduler.schedule()
+    assert decode_req.request_id in mixed.num_scheduled_tokens
+    assert prefill_req.request_id in mixed.num_scheduled_tokens
+    assert mixed.num_prefill_computed_tokens == 49
+
+    ids = list(mixed.num_scheduled_tokens)
+    sampled = [[100] if req_id == decode_req.request_id else [] for req_id in ids]
+    outputs = scheduler.update_from_output(
+        mixed,
+        ModelRunnerOutput(
+            req_ids=ids,
+            req_id_to_index={req_id: i for i, req_id in enumerate(ids)},
+            sampled_token_ids=sampled,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    stats = outputs[0].scheduler_stats
+    assert stats is not None
+    assert stats.prefill_computed_tokens == 49
+    assert stats.num_requests_prefilling == 1
+    assert stats.prefill_tokens_remaining == 31
+
+
+def test_live_prefill_metrics_stop_on_cancellation_before_next_step():
+    scheduler = create_scheduler(max_num_batched_tokens=50, enable_chunked_prefill=True)
+    (request,) = create_requests(
+        num_requests=1, num_tokens=80, req_ids=["cancel-prefill"]
+    )
+    scheduler.add_request(request)
+    executed = scheduler.schedule()
+    assert executed.num_prefill_computed_tokens == 50
+    scheduler.update_from_output(
+        executed,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    scheduler.finish_requests([request.request_id], RequestStatus.FINISHED_ABORTED)
+    cancelled = scheduler.schedule()
+    assert cancelled.total_num_scheduled_tokens == 0
+    assert cancelled.num_prefill_computed_tokens == 0
+
+
 def test_make_scheduled_encoder_input_stats_output_embeddings():
     scheduler = create_scheduler()
     mm_features = [
@@ -813,6 +923,7 @@ def test_throttle_prefills_excludes_fully_transferred_remote_kv():
     output = scheduler.schedule(throttle_prefills=True)
     assert "r2" in output.num_scheduled_tokens
     assert "r1" in output.num_scheduled_tokens
+    assert output.num_prefill_computed_tokens == 1
 
 
 def test_throttle_prefills_defers_remote_kv_resume_with_local_prefill():
@@ -1621,6 +1732,7 @@ def test_preemption_re_records_prefix_cache_query():
     scheduler.add_request(request)
 
     scheduler_output = scheduler.schedule()
+    assert scheduler_output.num_prefill_computed_tokens == request.num_prompt_tokens
     stats = scheduler.kv_cache_manager.prefix_cache_stats
     assert stats is not None
     assert (stats.requests, stats.preempted_requests) == (1, 0)
@@ -1644,8 +1756,9 @@ def test_preemption_re_records_prefix_cache_query():
     stats = scheduler.kv_cache_manager.prefix_cache_stats
     assert stats is not None
 
-    scheduler.schedule()
+    resumed_output = scheduler.schedule()
     assert request.status == RequestStatus.RUNNING
+    assert resumed_output.num_prefill_computed_tokens == request.num_prompt_tokens
     assert stats.preempted_requests == 1
 
 
@@ -2219,12 +2332,16 @@ def test_spec_decode_padding_first_decode_step():
     scheduler.add_request(r1)
     out = scheduler.schedule()
     assert out.num_scheduled_tokens[r1.request_id] == 33
+    assert out.num_prefill_computed_tokens == 33
     _model_output(scheduler, out, [[100]])
     scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[1, 2, 3]]))
 
     # r2 arrives; its whole prompt is a prefix-cache hit -> first decode step.
     scheduler.add_request(r2)
     out = scheduler.schedule()
+
+    # Cached prompt blocks and speculative padding are not local prefill work.
+    assert out.num_prefill_computed_tokens == 1
 
     # r1 verifies its real drafts.
     assert out.scheduled_spec_decode_tokens[r1.request_id] == [1, 2, 3]
@@ -2246,6 +2363,7 @@ def test_spec_decode_padding_resumed_request_without_running_requests():
     out = scheduler.schedule()
 
     assert out.num_scheduled_tokens[resumed.request_id] == 1 + num_spec
+    assert out.num_prefill_computed_tokens == 1
     assert out.scheduled_spec_decode_tokens[resumed.request_id] == [-1] * num_spec
 
 

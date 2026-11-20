@@ -386,6 +386,12 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
             self.last_scheduler_stats.kv_cache_usage += (
                 last_scheduler_stats.kv_cache_usage
             )
+            self.last_scheduler_stats.num_requests_prefilling += (
+                last_scheduler_stats.num_requests_prefilling
+            )
+            self.last_scheduler_stats.prefill_tokens_remaining += (
+                last_scheduler_stats.prefill_tokens_remaining
+            )
         self.last_scheduler_stats.kv_cache_usage /= len(self.last_scheduler_stats_dict)
 
     def log(self):
@@ -499,6 +505,30 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.gauge_scheduler_running = create_metric_per_engine(
             gauge_scheduler_running, per_engine_labelvalues
+        )
+
+        gauge_num_requests_prefilling = self._gauge_cls(
+            name="vllm:num_requests_prefilling",
+            documentation=(
+                "Number of running requests whose prompt is still being prefilled."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_num_requests_prefilling = create_metric_per_engine(
+            gauge_num_requests_prefilling, per_engine_labelvalues
+        )
+
+        gauge_prefill_tokens_remaining = self._gauge_cls(
+            name="vllm:prefill_tokens_remaining",
+            documentation=(
+                "Unprocessed prompt tokens remaining in running prefill requests."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_prefill_tokens_remaining = create_metric_per_engine(
+            gauge_prefill_tokens_remaining, per_engine_labelvalues
         )
 
         gauge_scheduler_waiting = self._gauge_cls(
@@ -675,6 +705,18 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.counter_prompt_tokens = create_metric_per_engine(
             counter_prompt_tokens, per_engine_labelvalues
+        )
+
+        counter_prefill_computed_tokens = self._counter_cls(
+            name="vllm:prefill_computed_tokens",
+            documentation=(
+                "Cumulative locally computed prompt tokens from completed prefill "
+                "execution steps."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_prefill_computed_tokens = create_metric_per_engine(
+            counter_prefill_computed_tokens, per_engine_labelvalues
         )
 
         # Labeled prompt token counters by source
@@ -1034,6 +1076,15 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 scheduler_stats.num_skipped_waiting_reqs
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
+            self.gauge_num_requests_prefilling[engine_idx].set(
+                scheduler_stats.num_requests_prefilling
+            )
+            self.gauge_prefill_tokens_remaining[engine_idx].set(
+                scheduler_stats.prefill_tokens_remaining
+            )
+            self.counter_prefill_computed_tokens[engine_idx].inc(
+                scheduler_stats.prefill_computed_tokens
+            )
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries

@@ -197,6 +197,13 @@ class SchedulerStats:
     current_wave: int = 0
 
     kv_cache_usage: float = 0.0
+
+    # Successful local prompt-compute work for this execution step. Cached
+    # and externally transferred tokens are excluded by the scheduler.
+    prefill_computed_tokens: int = 0
+    num_requests_prefilling: int = 0
+    prefill_tokens_remaining: int = 0
+
     iteration_details: SchedulerIterationDetails | None = None
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)

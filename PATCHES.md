@@ -44,6 +44,21 @@
   downstream-only `test_gp12_diagnostics.py` checks bounded state and log
   summaries. CPU checks do not establish GPU stability.
 
+## GP-20 production telemetry compatibility (2026-11-20)
+
+The production runtime already includes GP-20 live prefill telemetry. The
+recovered B development base predates those production-only Python changes, so
+this candidate carries the same telemetry contract forward to avoid replacing
+it with an older scheduler during GP-21.1 deployment. The scheduler snapshots
+locally computed prompt positions for the finalized batch and publishes the
+counter only after a successful model-runner output; local prefix hits,
+external KV, decode tokens, and speculative padding are excluded. The two
+gauges report requests still pre-filling and their remaining prompt positions.
+No scheduler admission or inference behavior is changed by this compatibility
+portion. Its CPU regressions cover chunked prefill without output tokens,
+mixed prefill/decode, prefix and external KV, preemption/resume, cancellation,
+and Prometheus publication without iteration output.
+
 ## Regression tests
 
 New tests imported from the recovered working tree:
