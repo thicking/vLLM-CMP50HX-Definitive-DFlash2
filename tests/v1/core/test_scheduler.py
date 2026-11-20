@@ -411,6 +411,97 @@ def test_prefill_batch_barrier_ignores_kv_admission_blocked_request():
     assert resumed.num_scheduled_tokens == {"running": 511}
 
 
+def test_prefill_barrier_does_not_promote_waiters_past_blocked_fifo_head():
+    """A rejected FIFO head must not let a later waiter stall running prefill."""
+    scheduler = create_scheduler(
+        max_num_seqs=2,
+        max_num_batched_tokens=512,
+        max_model_len=1024,
+        num_blocks=96,
+        block_size=16,
+        enable_chunked_prefill=True,
+        long_prefill_token_threshold=512,
+        prefill_batch_barrier=True,
+    )
+    running, blocked, later = create_requests(
+        num_requests=3,
+        num_tokens=1024,
+        max_tokens=1,
+        req_ids=["running", "blocked", "later"],
+    )
+    scheduler.add_request(running)
+    first = scheduler.schedule()
+    assert first.num_scheduled_tokens == {"running": 512}
+    scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(
+            req_ids=["running"],
+            req_id_to_index={"running": 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    scheduler.add_request(blocked)
+    scheduler.add_request(later)
+    rejected = scheduler.schedule()
+    assert rejected.num_scheduled_tokens == {}
+    assert "blocked" in scheduler._prefill_barrier_admission_blocked
+
+    # Retry the FIFO head, but do not promote a later waiter into the alignment
+    # frontier and starve the already-running request.
+    resumed = scheduler.schedule()
+    assert resumed.num_scheduled_tokens == {"running": 511}
+
+    def run_scheduled_step(output):
+        req_ids = list(output.num_scheduled_tokens)
+        sampled_token_ids = []
+        for request_id in req_ids:
+            request = scheduler.requests[request_id]
+            step_tokens = output.num_scheduled_tokens[request_id]
+            completes_prefill = (
+                request.num_computed_tokens + step_tokens
+                >= request.num_prompt_tokens
+            )
+            sampled_token_ids.append([0] if completes_prefill else [])
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=req_ids,
+                req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+                sampled_token_ids=sampled_token_ids,
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+
+    run_scheduled_step(resumed)
+    saw_blocked_head = False
+    saw_later_waiter = False
+    for _ in range(16):
+        output = scheduler.schedule()
+        assert output.num_scheduled_tokens, "scheduler made no progress before completion"
+        scheduled_ids = set(output.num_scheduled_tokens)
+        if "blocked" in scheduled_ids:
+            saw_blocked_head = True
+            assert "later" not in scheduled_ids
+        if "later" in scheduled_ids:
+            saw_later_waiter = True
+            assert blocked.is_finished()
+        run_scheduled_step(output)
+        if running.is_finished() and blocked.is_finished() and later.is_finished():
+            break
+
+    assert saw_blocked_head
+    assert saw_later_waiter
+    assert running.status == RequestStatus.FINISHED_LENGTH_CAPPED
+    assert blocked.status == RequestStatus.FINISHED_LENGTH_CAPPED
+    assert later.status == RequestStatus.FINISHED_LENGTH_CAPPED
+
+
 def test_prefill_batch_barrier_does_not_pause_decode_for_late_request():
     """A late prefill joins an active decode step instead of forcing a gap."""
     scheduler = create_scheduler(
