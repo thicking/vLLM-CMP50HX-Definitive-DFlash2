@@ -9,7 +9,9 @@
 
 ## Статус проекта
 
-Это экспериментальный релиз исходников [`v0.2.0-alpha.1`](https://github.com/thicking/vLLM-CMP50HX-Definitive-DFlash2/releases/tag/v0.2.0-alpha.1) под названием **Workload-aware KV Cache & Parallel Inference**. Тег относится к этой производной; унаследованная версия исходников upstream fork остаётся `v0.2.2-post2`. Готовые wheel и container image не публикуются. Чистая сборка и установка из этого репозитория на CMP50HX не проверялись.
+Последний релиз производного проекта — [`v0.2.0-alpha.2`](https://github.com/thicking/vLLM-CMP50HX-Definitive-DFlash2/releases/tag/v0.2.0-alpha.2), документальное дополнение без изменений runtime. Релиз исходников runtime остаётся [`v0.2.0-alpha.1`](https://github.com/thicking/vLLM-CMP50HX-Definitive-DFlash2/releases/tag/v0.2.0-alpha.1) **Workload-aware KV Cache & Parallel Inference**; унаследованная версия upstream fork — `v0.2.2-post2`. В alpha.2 не менялись код движка, профиль, launcher, модель или параметры production. Готовые wheel и container image не публикуются. Чистая сборка и установка непосредственно из этого репозитория на CMP50HX не проверялись.
+
+Материалы GP-24/GP-25: [руководство Prefix Cache](docs/prefix-cache.md), [измерения](docs/benchmarks.md), [подробный Lessons Learned на русском](docs/lessons-learned.ru.md).
 
 Первоначальный снимок Experimental B основан на upstream-fork commit `2d63e2e322b7488776d1fb822f3556dbd7334116`. Исходное дерево было shallow и dirty; локальные изменения импортированы одним snapshot-коммитом, без искусственной истории патчей. Последующие коммиты GP-20, GP-21.1 и GP-21.3 сохранены в истории релиза. Полное дерево исходников на момент перезагрузок сервера 10 ноября 2026 года отсутствует, поэтому наличие каждого восстановленного изменения в тот момент — **UNKNOWN**.
 

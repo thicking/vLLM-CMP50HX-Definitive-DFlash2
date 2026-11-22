@@ -6,7 +6,7 @@
 
 语言：[English](README.md) | 简体中文
 
-此公开派生仓库另行发布 `v0.2.0-alpha.1`，名称为 **Workload-aware KV Cache & Parallel Inference**。这只是下游项目版本；本页所述上游 fork 基线 `v0.2.2-post2` 保持不变。请查看[英文说明](README.md)、[俄文说明](README.ru.md)和[发布记录](CHANGELOG.md)。
+此公开派生仓库的最新发布为文档补充版 `v0.2.0-alpha.2`；运行时源码预发布版本仍为 `v0.2.0-alpha.1`（**Workload-aware KV Cache & Parallel Inference**）。alpha.2 未更改引擎代码、profile、launcher、模型或 production 参数；上游 fork 基线 `v0.2.2-post2` 不变。GP-24/GP-25 文档见[英文说明](README.md)、[俄文说明](README.ru.md)、[Prefix Cache 指南](docs/prefix-cache.md)和[发布记录](CHANGELOG.md)。
 
 面向双 RTX 2080 Ti 及其他 SM75 GPU 的 vLLM 专用推理运行时，包括 Tesla
 T10/T40/T4、TITAN RTX 和 Quadro RTX 6000/8000。

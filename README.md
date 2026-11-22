@@ -7,7 +7,9 @@ An independently maintained source derivative of [vLLM](https://github.com/vllm-
 
 ## Release status
 
-The downstream project release is [`v0.2.0-alpha.1`](https://github.com/thicking/vLLM-CMP50HX-Definitive-DFlash2/releases/tag/v0.2.0-alpha.1), titled **Workload-aware KV Cache & Parallel Inference**. The release tag versions this derivative; the inherited upstream-fork source identity remains `v0.2.2-post2`. No wheel or container image is published. A clean build and install from this repository have not been verified on CMP50HX.
+The latest downstream project release is [`v0.2.0-alpha.2`](https://github.com/thicking/vLLM-CMP50HX-Definitive-DFlash2/releases/tag/v0.2.0-alpha.2), a documentation-only supplement. The runtime source prerelease remains [`v0.2.0-alpha.1`](https://github.com/thicking/vLLM-CMP50HX-Definitive-DFlash2/releases/tag/v0.2.0-alpha.1), titled **Workload-aware KV Cache & Parallel Inference**; the inherited upstream-fork source identity remains `v0.2.2-post2`. No engine source, profile, launcher, model or production setting changes in alpha.2. No wheel or container image is published. A clean build and install from this repository have not been verified on CMP50HX.
+
+Operational findings: [Prefix Cache guide](docs/prefix-cache.md), [benchmarks](docs/benchmarks.md), and [Russian lessons learned](docs/lessons-learned.ru.md).
 
 The source snapshot is based on upstream-fork commit `2d63e2e322b7488776d1fb822f3556dbd7334116`. The production checkout was shallow and dirty. Its tracked diff was imported as one snapshot commit; the repository does not invent a patch-by-patch history. A SHA-256 manifest for that recovered snapshot is in [`manifests/production-b-20261115.sha256`](manifests/production-b-20261115.sha256). Exact source state during the host reboots on 2026-11-10 is unavailable, so whether each recovered change existed then is **UNKNOWN**.
 

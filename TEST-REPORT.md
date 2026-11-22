@@ -1,6 +1,10 @@
 <!-- Downstream documentation for vLLM-CMP50HX-Definitive-DFlash2; see PATCHES.md. -->
 # Experimental B validation record
 
+## v0.2.0-alpha.2 documentation supplement — 2026-11-22
+
+This documentation-only release adds [lessons learned](docs/lessons-learned.ru.md), a [Prefix Cache guide](docs/prefix-cache.md), and [profile-specific measurements](docs/benchmarks.md). It does not change runtime code or configuration and does not add GPU tests. The recorded values are single observed runs where stated; they are not generalized performance guarantees. Existing runtime validation remains distinct from clean-build reproducibility; a clean build directly from the published checkout remains **NOT VERIFIED**.
+
 ## v0.2.0-alpha.1 release verification — 2026-11-20
 
 ### Targeted CPU regressions

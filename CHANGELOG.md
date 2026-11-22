@@ -3,6 +3,12 @@
 
 This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately from upstream vLLM releases.
 
+## v0.2.0-alpha.2 - 2026-11-22 (documentation-only downstream release)
+
+- Publishes GP-24/GP-25 operational findings on Prefix Cache, hybrid KV residency, tool-schema stability, matched A/B measurements, and resource/toolchain lessons.
+- Adds no engine, profile, launcher, dependency, model, or production configuration changes and includes no new GPU test results.
+- The detailed runtime evidence and limitations remain in `TEST-REPORT.md`; clean build/install from the public checkout remains NOT VERIFIED.
+
 ## v0.2.0-alpha.1 - 2026-11-20 (independent downstream project)
 
 **Workload-aware KV Cache & Parallel Inference** — experimental source
